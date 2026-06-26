@@ -71,9 +71,10 @@ Install: `/plugin install codebase-docs@personal-ai-tools`
 > reference files (`LLM_MAP.md`, `doc_lint.py`, etc.) that don't exist there. Install it where that
 > convention is in use, or disable it per-project via the `/plugin` menu if it gets noisy.
 
-A generic, codebase-agnostic **Workflow** that operationalizes the `doc-maintenance` process lives
-under [`contrib/tiered-docs-workflow/`](./contrib/tiered-docs-workflow/) — a reference artifact to
-read and adapt, not bundled inside the installed plugin.
+A generic, codebase-agnostic **Workflow** that operationalizes the `doc-maintenance` process ships with
+the plugin under
+[`plugins/codebase-docs/skills/doc-maintenance/workflows/`](./plugins/codebase-docs/skills/doc-maintenance/workflows/)
+— a reference artifact to read and adapt (it is harness-specific), not auto-run as part of the skill.
 
 ---
 
@@ -114,17 +115,16 @@ Commit and push. Re-install with `/plugin marketplace update personal-ai-tools`,
 .
 ├── .claude-plugin/
 │   └── marketplace.json          # the catalog (lists all plugins)
-├── plugins/
-│   └── codebase-docs/
-│       ├── .claude-plugin/
-│       │   └── plugin.json
-│       └── skills/
-│           ├── codebase-context/SKILL.md
-│           └── doc-maintenance/
-│               ├── SKILL.md
-│               └── scripts/doc_lint.py
-└── contrib/
-    └── tiered-docs-workflow/      # generic Workflow reference (not bundled in the plugin)
-        ├── README.md
-        └── document-tiered-docs.workflow.js
+└── plugins/
+    └── codebase-docs/
+        ├── .claude-plugin/
+        │   └── plugin.json
+        └── skills/
+            ├── codebase-context/SKILL.md
+            └── doc-maintenance/
+                ├── SKILL.md
+                ├── scripts/doc_lint.py
+                └── workflows/      # generic Workflow reference (ships with the plugin; read & adapt)
+                    ├── README.md
+                    └── document-tiered-docs.workflow.js
 ```

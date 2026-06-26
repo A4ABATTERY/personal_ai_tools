@@ -76,11 +76,11 @@ The point is to **conserve your own context** so the work can run for many itera
 6. **Lint, commit, push** — run the link linter, then commit the `docs/` changes and push the branch.
 
 > **Optional power-tool.** For a deterministic, repeatable version of this explore → verify → integrate →
-> audit loop, a reference **Workflow** script lives in this marketplace repo under
-> `contrib/tiered-docs-workflow/` — run one cycle per invocation (1 = inventory, 2 = deepen,
-> 3 = mirror-restructure, 4 = audit) and review the digest between runs. The prose process here is the
-> canonical description; the Workflow is an adapt-don't-run-blind reference (it is harness-specific and is
-> NOT shipped inside the installed plugin).
+> audit loop, a reference **Workflow** script ships with this skill at
+> `workflows/document-tiered-docs.workflow.js` (next to this `SKILL.md`; see `workflows/README.md`) —
+> run one cycle per invocation (1 = inventory, 2 = deepen, 3 = mirror-restructure, 4 = audit) and review
+> the digest between runs. The prose process here is the canonical description; the Workflow is an
+> adapt-don't-run-blind reference (it is harness-specific — read and adapt it, don't run it unmodified).
 
 ## Audit cycle (the L0 → L1 → L2 → L3 walk)
 

@@ -1,9 +1,10 @@
-# contrib/tiered-docs-workflow
+# tiered-docs-workflow
 
-**Reference artifact — NOT bundled in the installed plugin.** This is a personal reference Workflow that
-operationalizes the `codebase-docs` plugin's `doc-maintenance` prose process. Nothing here is wired into
-`marketplace.json` or any `SKILL.md` — it is meant to be **read and adapted**, not installed or run blind
-(it is harness-specific).
+**Reference artifact bundled with this skill — adapt-don't-run-blind.** A generic, codebase-agnostic
+Workflow that operationalizes the `doc-maintenance` skill's prose process. It ships inside the
+`codebase-docs` plugin (here, next to the skill's `SKILL.md` and `scripts/`), but it is **not** auto-loaded
+or auto-run as part of the skill — it is harness-specific and meant to be **read and adapted**, then driven
+manually via the Workflow tool's `scriptPath`.
 
 A generic, codebase-agnostic Workflow that operationalizes the `doc-maintenance` skill's prose process:
 
@@ -11,11 +12,9 @@ A generic, codebase-agnostic Workflow that operationalizes the `doc-maintenance`
 |------|------------|
 | `document-tiered-docs.workflow.js` | A generic Workflow that runs one documentation cycle (scout → explore → verify → integrate, or audit → fix) over any repo, building a tiered `docs/` tree. |
 
-> **Note: the linter ships with the plugin.** `doc_lint.py` lives at
-> `plugins/codebase-docs/skills/doc-maintenance/scripts/doc_lint.py`, referenced from the skill's
-> verification gate via `${CLAUDE_SKILL_DIR}`. The `## doc_lint.py` notes below are retained for context
-> and apply to that shipped copy. The Workflow stays here as a reference artifact (harness-specific;
-> adapt-don't-run-blind) and is intentionally **not** bundled inside the installed plugin.
+> **Note: the linter ships alongside this workflow.** `doc_lint.py` lives at `../scripts/doc_lint.py`
+> (the skill's `scripts/` folder), referenced from the skill's verification gate via `${CLAUDE_SKILL_DIR}`.
+> The `## doc_lint.py` notes below apply to that shipped copy.
 
 ---
 
@@ -103,8 +102,8 @@ PUSH / PULL / LISTEN"*); leave it empty for fully generic role inference.
 - **Sub-agents fabricate and miscount** — every verifier/auditor re-checks falsifiable claims (counts,
   names, routes, "dead/unused" assertions) against code with `path:line` citations. Agreement between
   explorers is not proof.
-- Run the linter (now shipped at `plugins/codebase-docs/skills/doc-maintenance/scripts/doc_lint.py`)
-  between/after cycles; it must report **0 broken** links before committing.
+- Run the linter (shipped alongside at `../scripts/doc_lint.py`) between/after cycles; it must report
+  **0 broken** links before committing.
 
 This file is a **reference artifact**: it is syntactically valid (`node --check` passes) and faithful
 to the Workflow tool API, but is meant to be read and adapted, not necessarily run unmodified.
@@ -113,8 +112,8 @@ to the Workflow tool API, but is meant to be read and adapted, not necessarily r
 
 ## `doc_lint.py`
 
-_Now shipped at `plugins/codebase-docs/skills/doc-maintenance/scripts/doc_lint.py`; the usage below
-applies to that copy (run it with the script's real path)._
+_Shipped alongside this workflow at `../scripts/doc_lint.py` (the skill's `scripts/` folder); the usage
+below applies to that copy (run it with the script's real path)._
 
 Scans `<docs>/**/*.md`, extracts every markdown link, and verifies each relative target resolves to a
 real file on disk (links into the codebase are validated like any other path). External links
