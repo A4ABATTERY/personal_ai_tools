@@ -1,0 +1,8 @@
+{
+  "name": "codebase-docs",
+  "version": "0.3.0",
+  "description": "Codebase wayfinding + tiered-docs maintenance skills for any repo.",
+  "author": {
+    "name": "Arunav Biswas"
+  }
+}

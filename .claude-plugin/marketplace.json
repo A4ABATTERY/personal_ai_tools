@@ -1,0 +1,18 @@
+{
+  "name": "personal-ai-tools",
+  "description": "Personal Claude Code add-ons — skills, workflows, and harness tooling.",
+  "owner": {
+    "name": "Arunav Biswas"
+  },
+  "plugins": [
+    {
+      "name": "codebase-docs",
+      "description": "Codebase wayfinding (grep-first orientation + mandatory drift report) plus the tiered-docs maintenance orchestration process.",
+      "version": "0.3.0",
+      "source": "./plugins/codebase-docs",
+      "author": {
+        "name": "Arunav Biswas"
+      }
+    }
+  ]
+}

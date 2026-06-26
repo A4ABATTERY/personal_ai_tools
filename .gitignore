@@ -1,0 +1,7 @@
+# Machine-local Claude Code settings (keep local, never publish)
+.claude/settings.local.json
+.claude/*.local.json
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
