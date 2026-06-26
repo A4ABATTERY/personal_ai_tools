@@ -54,12 +54,13 @@ disable, or remove installed plugins.
 
 ### `codebase-docs`
 
-Two paired skills for working in a tiered-docs codebase:
+Three skills for working in a tiered-docs codebase:
 
 | Skill | What it does |
 |-------|--------------|
 | **codebase-context** | Wayfinding. A grep-first orientation protocol that finds where things live faster than blind grepping, reuses existing patterns, and **always reports code↔doc drift** — even when you didn't ask. Written to trigger proactively at the start of substantive work. |
 | **doc-maintenance** | The orchestration process for creating/updating the tiered docs (`docs/` — L0 `LLM_MAP.md`, L1 READMEs, L2 deep-dives). Dispatches sub-agents (explore → verify+write → audit), then lints and commits. |
+| **docs-init-or-improve** | The whole-repo front door. Fires when a project is **undocumented** (sets up the tiered-docs convention from scratch) or when the docs are **stale/inconsistent** and need a cleanup or consistency check. It assesses state, bootstraps `docs/STRUCTURE.md` + a seed `docs/LLM_MAP.md`, then hands off to `doc-maintenance`. |
 
 Install: `/plugin install codebase-docs@personal-ai-tools`
 
@@ -121,6 +122,9 @@ Commit and push. Re-install with `/plugin marketplace update personal-ai-tools`,
         │   └── plugin.json
         └── skills/
             ├── codebase-context/SKILL.md
+            ├── docs-init-or-improve/        # whole-repo front door: init or clean-up
+            │   ├── SKILL.md
+            │   └── assets/STRUCTURE.template.md
             └── doc-maintenance/
                 ├── SKILL.md
                 ├── scripts/doc_lint.py

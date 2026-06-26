@@ -1,17 +1,19 @@
 # codebase-docs
 
-A coupled pair of skills for working in a tiered-docs codebase. **They install together as one
-plugin and are meant to be used together** — neither is shipped on its own.
+Three skills for working in a tiered-docs codebase. **They install together as one plugin and are
+meant to be used together** — none is shipped on its own.
 
 | Skill | Role |
 |-------|------|
 | **codebase-context** | *Wayfinding / drift detection.* Grep-first orientation that finds where things live, reuses existing patterns, and always reports code↔doc drift. Use at the start of substantive work. |
 | **doc-maintenance** | *Production process.* Orchestrates sub-agents to create/update the tiered `docs/` (L0 `LLM_MAP.md` → L1 READMEs → L2 deep-dives), then lints and commits. |
+| **docs-init-or-improve** | *Whole-repo front door.* Fires when a project is **undocumented** (bootstraps the tiered-docs convention from scratch) or its docs are **stale/inconsistent** and need a cleanup/consistency check. Assesses state, scaffolds `docs/STRUCTURE.md` + a seed `docs/LLM_MAP.md`, then hands off to `doc-maintenance`. |
 
-**Why they're coupled:** `doc-maintenance` builds and maintains the tiered docs structure
-(`docs/LLM_MAP.md`, `docs/STRUCTURE.md`, the L0–L3 tiers) that `codebase-context` navigates and
-keeps honest. One writes the map; the other reads it and flags when it drifts from the code. Each
-skill references the other in its workflow, so installing them as a pair is intentional.
+**Why they're coupled:** `docs-init-or-improve` decides *init vs. clean up* and lays the convention
+down once; `doc-maintenance` builds and maintains the tiered docs structure (`docs/LLM_MAP.md`,
+`docs/STRUCTURE.md`, the L0–L3 tiers); `codebase-context` navigates that structure and keeps it
+honest. One sets up the front door, one writes the map, one reads it and flags drift. Each skill
+references the others, so installing them together is intentional.
 
 ## Install
 

@@ -2,9 +2,11 @@
 name: doc-maintenance
 description: >-
   The repeatable process for CREATING or UPDATING this codebase's tiered docs (docs/ — L0 LLM_MAP, L1
-  READMEs, L2 deep-dives, domain docs). Invoke whenever code has changed and its docs need to catch up, a
-  new/undocumented area must be documented, doc-vs-code drift needs fixing, or a full re-documentation
-  pass is wanted. You act as an ORCHESTRATOR: dispatch sub-agents (cheap model explores → mid model
+  READMEs, L2 deep-dives, domain docs). Invoke to write or update the docs for a SPECIFIC area/module after
+  its code changed, to document a newly-added area, or to run a per-area drift/audit fix. (For first-time
+  setup of an UNDOCUMENTED project, or a whole-repo stale-docs cleanup/consistency pass, start with the
+  `docs-init-or-improve` skill — it assesses state and bootstraps the convention, then hands back to this
+  process.) You act as an ORCHESTRATOR: dispatch sub-agents (cheap model explores → mid model
   verifies+writes → strong model audits), never read/edit doc or code files yourself, pass file PATHS
   between agents, verify every claim against the codebase (the code is the source of truth), then lint,
   commit, and push. Pair with the `codebase-context` skill (wayfinding/drift detection) — that one tells
