@@ -8,7 +8,7 @@
     {
       "name": "codebase-docs",
       "description": "Codebase wayfinding (grep-first orientation + mandatory drift report) plus the tiered-docs maintenance orchestration process.",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "source": "./plugins/codebase-docs",
       "author": {
         "name": "Arunav Biswas"

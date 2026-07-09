@@ -62,6 +62,16 @@ The point is to **conserve your own context** so the work can run for many itera
    can't concept-clobber.) **Only if speed forces it** should you parallelize writers — and then enforce
    strictly **disjoint** file/subtree ownership (exactly one owner for `LLM_MAP.md`/`STRUCTURE.md`),
    accepting the residual concept-overlap risk that sequencing would have removed.
+9. **When control returns to you, the sub-agent is DONE — nothing further is coming.** A dispatch has no
+   follow-up "finished" message; twice-observed failure: the orchestrator stalled mid-flow "waiting for
+   the writer/auditor to confirm" after that agent had already completed. Never wait. Confirm the output
+   exists at the expected path cheaply (a file listing, the linter, `git status` — not by reading
+   contents, per rule 2) and dispatch the next step immediately.
+10. **All agent↔agent communication routes through YOU.** Sub-agents cannot reply to each other —
+   peer-to-peer messages fail (no agent ID to address) and the reply dead-ends. A writer answering an
+   auditor's finding (or vice versa) does it by writing to its temp/doc files; you dispatch the
+   counterpart with the PATHS. Brief every agent accordingly: output goes to files plus a short summary
+   back to you — never "reply to the auditor/writer".
 
 ## Per-iteration recipe
 
@@ -83,6 +93,22 @@ The point is to **conserve your own context** so the work can run for many itera
 > run one cycle per invocation (1 = inventory, 2 = deepen, 3 = mirror-restructure, 4 = audit) and review
 > the digest between runs. The prose process here is the canonical description; the Workflow is an
 > adapt-don't-run-blind reference (it is harness-specific — read and adapt it, don't run it unmodified).
+
+## Small-update path (lean mode)
+
+For a SMALL, localized docs update — a handful of lines across one or two existing docs, no new surface,
+no cross-cutting flow change (e.g. a status flip, a renamed field, a corrected count) — the full
+explorer→writer→auditor chain costs more than it protects, and skipping the skill entirely is worse.
+Use this instead:
+
+1. **Dispatch ONE mid-model agent** briefed with: the code change (absolute paths), the doc(s) to update,
+   and the instruction to act as its own auditor — verify every falsifiable claim it writes against code
+   with `file:line` citations *before* writing it.
+2. **You run the link linter** (must report 0 broken), then commit and push per the Git rules below.
+
+State explicitly that you chose the lean path and why. **Escalate to the full chain** the moment the change
+grows: a new surface to document, more than ~2 docs touched, cross-cutting/data-lineage content, or any
+security-relevant claim.
 
 ## Audit cycle (the L0 → L1 → L2 → L3 walk)
 
