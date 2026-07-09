@@ -77,6 +77,18 @@ the plugin under
 [`plugins/codebase-docs/skills/doc-maintenance/workflows/`](./plugins/codebase-docs/skills/doc-maintenance/workflows/)
 — a reference artifact to read and adapt (it is harness-specific), not auto-run as part of the skill.
 
+### `orchestrated-delivery`
+
+An orchestrator-driven **delivery loop** for non-trivial code changes — independent planning,
+adversarial panel + blind-gate review, and verified testing before merge. One skill defines the loop;
+six sub-agents (`od-planner`, `od-auditor`, `od-lead-auditor`, `od-implementer`, `od-tester`,
+`od-researcher`) do the work. The main session never implements directly — it dispatches scoped agents,
+reads their summaries, and drives the gates. Hardened over ~15 real delivery cycles; every rule traces
+to an observed failure. Project specifics (model policy, branch/merge convention, test entry points,
+deploy flow) are resolved from each project's `CLAUDE.md` at run time — nothing is hardcoded.
+
+Install: `/plugin install orchestrated-delivery@personal-ai-tools`
+
 ---
 
 ## For maintainers — adding more plugins
@@ -117,18 +129,30 @@ Commit and push. Re-install with `/plugin marketplace update personal-ai-tools`,
 ├── .claude-plugin/
 │   └── marketplace.json          # the catalog (lists all plugins)
 └── plugins/
-    └── codebase-docs/
+    ├── codebase-docs/
+    │   ├── .claude-plugin/
+    │   │   └── plugin.json
+    │   └── skills/
+    │       ├── codebase-context/SKILL.md
+    │       ├── docs-init-or-improve/        # whole-repo front door: init or clean-up
+    │       │   ├── SKILL.md
+    │       │   └── assets/STRUCTURE.template.md
+    │       └── doc-maintenance/
+    │           ├── SKILL.md
+    │           ├── scripts/doc_lint.py
+    │           └── workflows/      # generic Workflow reference (ships with the plugin; read & adapt)
+    │               ├── README.md
+    │               └── document-tiered-docs.workflow.js
+    └── orchestrated-delivery/
         ├── .claude-plugin/
         │   └── plugin.json
-        └── skills/
-            ├── codebase-context/SKILL.md
-            ├── docs-init-or-improve/        # whole-repo front door: init or clean-up
-            │   ├── SKILL.md
-            │   └── assets/STRUCTURE.template.md
-            └── doc-maintenance/
-                ├── SKILL.md
-                ├── scripts/doc_lint.py
-                └── workflows/      # generic Workflow reference (ships with the plugin; read & adapt)
-                    ├── README.md
-                    └── document-tiered-docs.workflow.js
+        ├── skills/
+        │   └── orchestrated-delivery/SKILL.md   # the delivery loop
+        └── agents/                              # the six od-* sub-agents
+            ├── od-planner.md
+            ├── od-auditor.md
+            ├── od-lead-auditor.md
+            ├── od-implementer.md
+            ├── od-tester.md
+            └── od-researcher.md
 ```

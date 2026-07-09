@@ -13,6 +13,15 @@
       "author": {
         "name": "Arunav Biswas"
       }
+    },
+    {
+      "name": "orchestrated-delivery",
+      "description": "Orchestrator-driven delivery loop — independent planning, adversarial panel + blind-gate review, and verified testing before merge.",
+      "version": "2.0.0",
+      "source": "./plugins/orchestrated-delivery",
+      "author": {
+        "name": "Arunav Biswas"
+      }
     }
   ]
 }
