@@ -1,0 +1,34 @@
+#!/bin/sh
+# Reject commits that introduce a UTF-8 BOM (EF BB BF) at the start of a file.
+# A BOM makes plugin.json / marketplace.json fail to parse ("Unrecognized token").
+# Windows PowerShell 5.1's Out-File/Set-Content default to BOM-emitting encodings,
+# so this guard catches the common regression before it lands.
+
+fail=0
+
+# Only staged, added/copied/modified files (skip deletions).
+files=$(git diff --cached --name-only --diff-filter=ACM)
+
+for f in $files; do
+	[ -f "$f" ] || continue
+	# Read the first three bytes of the staged (index) content.
+	bom=$(git show ":$f" 2>/dev/null | head -c 3 | od -An -tx1 | tr -d ' \n')
+	if [ "$bom" = "efbbbf" ]; then
+		echo "BOM detected: $f"
+		fail=1
+	fi
+done
+
+if [ "$fail" -ne 0 ]; then
+	echo ""
+	echo "Refusing to commit: the file(s) above start with a UTF-8 BOM."
+	echo "Strip it, e.g. in Git Bash:"
+	echo "  sed -i '1s/^\xEF\xBB\xBF//' <file>"
+	echo "or in PowerShell:"
+	echo "  \$t=[IO.File]::ReadAllText('<file>'); [IO.File]::WriteAllText('<file>',\$t,(New-Object Text.UTF8Encoding \$false))"
+	echo ""
+	echo "To bypass this check for one commit: git commit --no-verify"
+	exit 1
+fi
+
+exit 0
