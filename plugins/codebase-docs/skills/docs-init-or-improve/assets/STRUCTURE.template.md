@@ -1,7 +1,10 @@
 <!--
   TEMPLATE — copy to docs/STRUCTURE.md and adapt to THIS repo.
   Fill every <FILL IN …> marker. Keep the tier DEFINITIONS verbatim: the codebase-context and
-  doc-maintenance skills key off them, so they must not drift. Delete this comment after adapting.
+  doc-maintenance skills key off them, so they must not drift. Delete THIS comment after adapting.
+  Leave the separate `<!-- INSTALL: citation-conventions section ... -->` marker further down alone —
+  it is replaced mechanically by the shared install procedure (docs-init-or-improve STEP 2A / docs-migrate
+  STEP 1), never by hand.
 -->
 
 # Documentation structure & scope contract
@@ -52,6 +55,9 @@ When code changes, update the docs it invalidates. Adapt these rows to this repo
 | A data model / schema / migration in `<FILL IN>` | the data-layer L2 for that store |
 | A cross-cutting flow spanning modules | every L2 on the flow + the L1 that synthesizes it |
 | Added a whole new module/area | a new L1 (if synthesis warrants), its L2s, and an L0 link |
+
+<!-- INSTALL: citation-conventions section installed here by docs-init-or-improve/docs-migrate at
+scaffold/migration time — see assets/doc-conventions/STRUCTURE-citation-section.template.md -->
 
 ## Doc workflow (how these docs get written and kept honest)
 
