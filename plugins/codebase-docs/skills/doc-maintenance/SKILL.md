@@ -29,6 +29,12 @@ tiny leaf folder just to complete the mirror — that regresses into the file in
 (see the Tier contract). A deep, namespace-mirroring tree wants nested per-subfolder L1s; a flat or
 shallow tree wants fewer, higher L1s.
 
+The recipe below assumes the tiered `docs/LLM_MAP.md` convention by default. When the project declares a
+different `docs_layout` (e.g. no `docs/` tree at all — a flat corpus, constitution-style docs), adapt the
+explore→verify+write→audit recipe and the Tier contract below to that declared shape instead of forcing
+the tiered convention onto it; the orchestrator-hygiene rules (paths not contents, sequential writers,
+never read/edit yourself) still apply unchanged.
+
 ## You are the ORCHESTRATOR (hard rules)
 
 The point is to **conserve your own context** so the work can run for many iterations.

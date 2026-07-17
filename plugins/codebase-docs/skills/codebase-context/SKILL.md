@@ -13,6 +13,12 @@ the drift.** Doc folders mirror the codebase's own structure (`repo → project 
 structure carries meaning; no imposed backend/frontend split). Full tier scope-contract + doc workflow:
 `docs/STRUCTURE.md` (read only if editing docs).
 
+This tiered shape is the DEFAULT `docs_layout`. If the project declares a different `docs_layout`
+(e.g. via an Orchestrated Delivery adaptation contract, or its own README) — a flat corpus, a
+constitution-style doc set, no `docs/` tree at all — locate THAT layout's own entry point/index first
+and degrade gracefully: apply the same source-of-truth-is-code and drift-report discipline below to
+whatever the declared layout actually is, rather than forcing the L0→L3 tiers onto it.
+
 > **The user usually will NOT ask you to check for drift or gotchas — surfacing them anyway is the whole
 > point of this skill.** §Drift-report below is a REQUIRED part of every answer, including a plain
 > "how does X work?" lookup. A feature that looks live but is half-disabled is the most important thing to catch.

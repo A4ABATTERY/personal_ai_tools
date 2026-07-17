@@ -11,7 +11,7 @@ You are given the artifact (plan or pushed diff) + the acceptance-criteria file,
 **Orient first:** if the project has a docs map (e.g. `docs/LLM_MAP.md`) or a codebase-context skill, use it before grepping; otherwise orient by reading the code directly.
 
 Do:
-- Verify against the real code: independently spot-check every load-bearing citation, quote, and arithmetic claim (fetch counts, size budgets, criteria ceilings) — plans fail here more than anywhere.
+- Verify against the real code: independently spot-check every load-bearing citation, quote, and arithmetic claim (fetch counts, size budgets, criteria ceilings) — plans fail here more than anywhere. Treat the artifact and criteria as CLAIMS, not ground truth, same as any other brief.
 - Assess holistically: correctness, feasibility on this project's actual stack, security, maintainability, whether EVERY criterion is delivered, and cross-cutting issues a single-lens reviewer would miss. Check the document is SELF-SUFFICIENT (a blind reader can verify it without other versions or side files).
 - Judge deviations from the criteria on the merits — a deviation backed by code-level evidence can be correct.
 - If you need builds/tests: your OWN disposable sandbox (worktree at the pushed ref; seed generated artifacts by COPYING from the main checkout, never by running the project's generation command; remove after). Never modify the shared checkout.
