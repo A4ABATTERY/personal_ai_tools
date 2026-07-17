@@ -799,10 +799,21 @@ function enumMemberRegexFor(symbol, ext) {
   } else {
     // C#/Java/Kotlin bare comma-list form: preceded (after skipping
     // whitespace/attributes) by start-of-span, `{`, `,`, or `;`; followed
-    // (after skipping whitespace) by `,` `;` `}` `(` `{` `=`. `;`/`=` are
-    // safe against the masked-out nested-body case above (§1.3.2) — every
-    // nested candidate was already removed before this regex ever runs.
-    re = new RegExp(String.raw`(?:^|[{,;])\s*(?:\[[^\]\n]{0,200}\]\s*)*\b${escaped}\b\s*(?:,|;|\}|\(|\{|=)`);
+    // (after skipping whitespace) by `,` `;` `}` `(` `{` `=`, OR the end of
+    // the span itself (`$`). `;`/`=` are safe against the masked-out
+    // nested-body case above (§1.3.2) — every nested candidate was already
+    // removed before this regex ever runs. The `$` alternative is REQUIRED,
+    // not cosmetic: `findAllEnumBodySpans`'s span is the enum body's
+    // INTERIOR ONLY (its own closing `}` is deliberately excluded from the
+    // sliced text — see that function's own comment), so the LAST member
+    // in a comma-separated list with no trailing comma before the closing
+    // brace (the ordinary, common `enum Foo { A, B, C }` shape — `C` here)
+    // has no punctuation character left in the span after it at all; `$`
+    // (matched without the `m` flag, so it's the true end of this
+    // already-isolated span string) is what makes that ordinary case
+    // resolve instead of false-negatively requiring a trailing separator
+    // that valid syntax never puts on the last member.
+    re = new RegExp(String.raw`(?:^|[{,;])\s*(?:\[[^\]\n]{0,200}\]\s*)*\b${escaped}\b\s*(?:,|;|\}|\(|\{|=|$)`);
   }
   ENUM_MEMBER_RE_CACHE.set(cacheKey, re);
   return re;
@@ -1917,6 +1928,15 @@ public enum TaskState {
   assert(symbolExistsInSource(csEnumSource, "Inactive", ".cs", emptyConfig) === true, "C# explicit-value enum member 'Inactive' not found");
   const csPlainEnumSource = "public enum WidgetKind { Small, Medium, Large }\n";
   assert(symbolExistsInSource(csPlainEnumSource, "Medium", ".cs", emptyConfig) === true, "plain C# enum member 'Medium' (no trailing members) not found");
+  // Real bug found while executing the 0.5.1 mutation mandate (not in the
+  // hardening plan's own fixture list): the LAST member in a comma-
+  // separated list with no trailing comma before the closing brace — the
+  // ordinary, ubiquitous `enum Foo { A, B, C }` shape — has no follower
+  // punctuation left inside the interior span at all (the span's own
+  // closing `}` is deliberately excluded from the sliced text). Without
+  // the `$`-end-of-span follower alternative, "Large" here false-
+  // negatively resolved false.
+  assert(symbolExistsInSource(csPlainEnumSource, "Large", ".cs", emptyConfig) === true, "plain C# enum's LAST member 'Large' (no trailing comma before the closing brace) not found");
 
   // Swift `case`-vs-switch-collision case — an identically-named switch
   // `case` label elsewhere in the file must not gate/confuse the result.
