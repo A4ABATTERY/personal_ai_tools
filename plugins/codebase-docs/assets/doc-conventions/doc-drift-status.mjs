@@ -48,6 +48,8 @@ import {
   mkdirSync,
   rmSync,
   readdirSync,
+  realpathSync,
+  symlinkSync,
 } from "node:fs";
 import { join, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -235,6 +237,19 @@ function isShallowRepo(repoRoot) {
   }
 }
 
+const REALPATH_CACHE = new Map();
+function cachedRealpath(p) {
+  if (REALPATH_CACHE.has(p)) return REALPATH_CACHE.get(p);
+  let real;
+  try {
+    real = realpathSync(p);
+  } catch {
+    real = null;
+  }
+  REALPATH_CACHE.set(p, real);
+  return real;
+}
+
 /** Case table (on-disk existence x git history) — resolves the "deleted
  *  but once tracked" vs "never existed" vs "untracked but present" cases
  *  BEFORE any timestamp comparison happens, per the design's §4.2 case
@@ -254,7 +269,28 @@ function resolvePathHistory(repoRoot, relPath) {
   const joined = join(repoRoot, relPath);
   const withinRepo = joined === repoRoot || joined.startsWith(repoRoot + sep);
   if (!withinRepo) return { case: "neverExisted" };
-  const absExists = existsSync(joined);
+  let absExists = existsSync(joined);
+  if (absExists) {
+    // Symlink-escape hardening (mirrors check-doc-cites.mjs's
+    // isPathContained() second half): the literal joined path can be
+    // INSIDE repoRoot on its face while resolving, via a symlink, to a
+    // target OUTSIDE it — the prefix check above only catches literal
+    // `../` sequences, not this. Without this, an untracked in-repo
+    // symlink pointing outside the repo would still produce a
+    // distinguishable "exists on disk" vs "doesn't" signal in
+    // integrityIssues depending on whether the outside target happens to
+    // exist — an existence-only oracle (no file content is ever read
+    // here), but a real one for a tool installed into arbitrary repos.
+    // Route it to "does not exist" so both cases collapse to the same,
+    // non-leaking code path.
+    const realCandidate = cachedRealpath(joined);
+    const realRoot = cachedRealpath(repoRoot);
+    const symlinkContained =
+      realCandidate !== null &&
+      realRoot !== null &&
+      (realCandidate === realRoot || realCandidate.startsWith(realRoot + sep));
+    if (!symlinkContained) absExists = false;
+  }
   const out = git(repoRoot, ["log", "-1", "--follow", "--format=%H%x09%ct", "--", relPath]).trim();
   const hasHistory = out.length > 0;
   if (absExists && hasHistory) {
@@ -893,11 +929,96 @@ function runSelfTestLayer2Historical() {
   }
 }
 
+/** Safety re-audit dissent (round 3): `resolvePathHistory`'s literal-`../`
+ *  containment check (added round 2) did NOT close the symlink half of the
+ *  same existence-oracle class — an UNTRACKED in-repo symlink whose target
+ *  resolves OUTSIDE the repo still produced a distinguishable "exists on
+ *  disk" (case: "untracked") vs "doesn't" (case: "neverExisted") signal,
+ *  depending on whether the outside target happened to exist. Existence-
+ *  only (no file content is ever read by this script either way), but a
+ *  real oracle for a tool installed into arbitrary repos. Plants exactly
+ *  that: an in-repo symlink, deliberately left untracked, pointing at an
+ *  outside file that DOES exist — asserts `resolvePathHistory` reports
+ *  "neverExisted" (the non-leaking case), never "untracked" (which would
+ *  reveal the outside target's existence). Also proves it end-to-end via
+ *  `buildReport`'s real `integrityIssues` message for a `covers` entry
+ *  citing the same symlink. */
+function runSelfTestSymlinkEscape() {
+  const scratchRoot = initScratchRepo();
+  const outsideRoot = mkdtempSync(join(tmpdir(), "doc-drift-status-selftest-outside-"));
+  try {
+    // An outside file that DOES exist — this is exactly the fact the fix
+    // must prevent from being distinguishable via resolvePathHistory's case.
+    const outsideTargetPath = join(outsideRoot, "outside-secret.ts");
+    writeFileSync(outsideTargetPath, "export const OUTSIDE = 1;\n", "utf8");
+
+    // Commit the covering doc FIRST — the symlink is created only AFTER
+    // this commit, and this helper's `commitAt` runs `git add -A`, so
+    // creating the symlink afterward is what keeps it genuinely untracked
+    // (the exact state the pre-fix code mishandled: case "untracked",
+    // leaking the outside target's existence, instead of the correct,
+    // non-leaking "neverExisted").
+    const docsDir = join(scratchRoot, "docs", "area4");
+    mkdirSync(docsDir, { recursive: true });
+    writeFileSync(
+      join(docsDir, "escape.md"),
+      '---\ncovers:\n  - "escape-link.ts"\nrelated: []\nstatus: current\n---\n\n# Escape\n',
+      "utf8",
+    );
+    commitAt(scratchRoot, 1_730_000_000, "add docs/area4/escape.md (symlink created after, left untracked)");
+
+    const symlinkPath = join(scratchRoot, "escape-link.ts");
+    try {
+      symlinkSync(outsideTargetPath, symlinkPath);
+    } catch (e) {
+      // Symlink creation can fail in some sandboxed/restricted environments
+      // — skip this vector rather than fail the whole suite on an
+      // environment limitation, but say so loudly.
+      console.error(
+        `doc-drift-status --self-test: WARNING — could not create a symlink in this environment (${e.message}); ` +
+          `skipping the symlink-escape self-test.`,
+      );
+      return;
+    }
+
+    const info = resolvePathHistory(scratchRoot, "escape-link.ts");
+    assert(
+      info.case === "neverExisted",
+      `an untracked in-repo symlink pointing OUTSIDE the repo (whose target exists) must resolve to case ` +
+        `"neverExisted" (no distinguishable on-disk-existence signal), got "${info.case}" — this leaks whether ` +
+        `the outside target exists`,
+    );
+
+    // End-to-end: the same fact must hold through the real buildReport
+    // pipeline (the "neverExisted"-shaped integrityIssues message, never
+    // the "untracked"-shaped one that would reveal on-disk existence).
+    const config = { ...DEFAULT_CONFIG, ...DEFAULT_THRESHOLDS, scopedDocDirs: ["docs/area4"] };
+    const report = buildReport(scratchRoot, config);
+    const hasNeverExistedMessage = report.integrityIssues.some(
+      (i) => i.includes("escape-link.ts") && i.includes("has no git history and doesn't exist on disk"),
+    );
+    const hasUntrackedMessage = report.integrityIssues.some(
+      (i) => i.includes("escape-link.ts") && i.includes("exists on disk but has no git history"),
+    );
+    assert(
+      hasNeverExistedMessage && !hasUntrackedMessage,
+      `buildReport's integrityIssues for the symlink-escaping covers entry must use the non-leaking ` +
+        `"neverExisted" phrasing, never the "untracked" (exists-on-disk) phrasing: ${JSON.stringify(report.integrityIssues)}`,
+    );
+
+    console.log("doc-drift-status --self-test: Layer 2e (symlink-escape existence-oracle closed) — passed.");
+  } finally {
+    rmSync(scratchRoot, { recursive: true, force: true });
+    rmSync(outsideRoot, { recursive: true, force: true });
+  }
+}
+
 function runSelfTest() {
   runSelfTestLayer1();
   runSelfTestLayer2();
   runSelfTestLayer2MinorMajor();
   runSelfTestLayer2Historical();
+  runSelfTestSymlinkEscape();
   console.log("doc-drift-status --self-test: ALL LAYERS PASSED.");
 }
 
