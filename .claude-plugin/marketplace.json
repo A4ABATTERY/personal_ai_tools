@@ -8,7 +8,7 @@
     {
       "name": "codebase-docs",
       "description": "Codebase wayfinding (grep-first orientation + mandatory drift report) plus the tiered-docs maintenance orchestration process.",
-      "version": "0.4.1",
+      "version": "0.4.2",
       "source": "./plugins/codebase-docs",
       "author": {
         "name": "Arunav Biswas"
@@ -17,7 +17,7 @@
     {
       "name": "orchestrated-delivery",
       "description": "Orchestrator-driven delivery loop — independent planning, adversarial panel + blind-gate review, and verified testing before merge.",
-      "version": "2.1.0",
+      "version": "2.2.0",
       "source": "./plugins/orchestrated-delivery",
       "author": {
         "name": "Arunav Biswas"
