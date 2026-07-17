@@ -146,6 +146,10 @@ it defaults to `./docs`.) The linter must report **0 broken** links → exit 0. 
 (relative paths to source files) are validated like any other path. Treat "in-docs dir links" warnings as
 a nudge to point at a specific `.md`.
 
+If the repo uses doc frontmatter (`covers`/`related`/`status`) + symbol cites, update them for every
+touched doc; run the repo's doc-cite lint before returning. (Forward-compatible: harmless where the repo
+uses neither.)
+
 ## Tier contract (quick reference — full version in docs/STRUCTURE.md)
 
 - **L0** (`docs/LLM_MAP.md`): one-sentence purpose per system + link to its code folder/L1. No code,
