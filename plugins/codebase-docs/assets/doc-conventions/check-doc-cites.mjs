@@ -62,6 +62,8 @@ import {
   mkdirSync,
   writeFileSync,
   rmSync,
+  realpathSync,
+  symlinkSync,
 } from "node:fs";
 import { join, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -108,7 +110,15 @@ function loadConfig() {
 // cross-references by construction rather than by a secondary allowlist.
 // ---------------------------------------------------------------------------
 
-const PATH_RE_SRC = String.raw`[\w./@-]+\.\w+`;
+// Bounded quantifiers ({1,240} / {1,20}), not unbounded `+` (ReDoS fix): the
+// original `[\w./@-]+\.\w+` has an ambiguous prefix — the leading class
+// already contains `.`, so on a long run with no eventual matching suffix
+// the engine backtracks over every split point at every start offset
+// (O(n^2), measured 53s on a 128k adversarial blob). Capping both repeats
+// bounds the worst-case backtracking cost per start position to a constant,
+// turning the scan back into O(n) total. 240/20 comfortably covers any real
+// repo-relative path/extension while eliminating the unbounded blowup.
+const PATH_RE_SRC = String.raw`[\w./@-]{1,240}\.\w{1,20}`;
 const IDENT_RE_SRC = String.raw`[A-Za-z_$][\w$-]*`;
 const SYMBOL_SEGMENT_RE_SRC = String.raw`${IDENT_RE_SRC}|\["[^"]*"\]|\['[^']*'\]|\[\d+\]`;
 const SYMBOL_RE_SRC = String.raw`(?:${SYMBOL_SEGMENT_RE_SRC})(?:\.(?:${IDENT_RE_SRC})|\["[^"]*"\]|\['[^']*'\]|\[\d+\])*`;
@@ -120,6 +130,77 @@ function escapeRegex(s) {
 
 function isGeneratedPath(p, config) {
   return config.generatedPathPrefixes.some((prefix) => p.startsWith(prefix));
+}
+
+/** `_scriptInstallDir` must be a SINGLE path segment (e.g. "scripts",
+ *  "tools") directly under the repo root — REPO_ROOT is computed as
+ *  `resolve(__dirname, "..")`, which is only correct one level below the
+ *  real repo root. A nested value (e.g. "packages/foo/scripts", from a
+ *  monorepo install) would silently miscompute REPO_ROOT to the wrong
+ *  ancestor, which in turn would make every containment check below (the
+ *  path-traversal guard) validate against the WRONG boundary. Refuse to run
+ *  rather than silently operate against a miscomputed root. */
+function assertScriptInstallDirIsSingleSegment(config) {
+  const val = config._scriptInstallDir;
+  if (typeof val !== "string" || val === "") return; // not set — nothing to validate
+  if (val.includes("/") || val.includes("\\")) {
+    console.error(
+      `check-doc-cites: doc-cite-config.json's "_scriptInstallDir" ("${val}") contains a path separator — ` +
+        `only a single directory name directly under the repo root is supported (REPO_ROOT is computed as ` +
+        `one level above this script's own install location). A nested install path would make REPO_ROOT, ` +
+        `and therefore every path-containment check, resolve against the wrong boundary. Refusing to run.`,
+    );
+    process.exit(1);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Path-containment guard (security fix): every doc-authored path (a
+// `covers`/`§`-citation target, or a heading-anchor link target) must
+// resolve to somewhere INSIDE repoRoot before this script ever calls
+// existsSync/statSync/readFileSync on it. Without this, `join(repoRoot,
+// "../outside/secret.ts")` or a symlink planted inside the repo pointing
+// outside it would let a doc's `covers:`/§-citation/heading-link content
+// make the lint read (and get a declaration/heading-slug match signal for)
+// ANY file the process can read — a path-traversal / symlink-escape oracle.
+// Fix: canonicalize (realpathSync) the resolved candidate AND repoRoot, and
+// require the real candidate path to be repoRoot itself or nested under it
+// (`sep`-prefixed) — this catches BOTH literal `../` sequences (they
+// resolve outside the prefix even before symlink-following) AND an
+// in-repo symlink that points outside (caught only after realpath
+// resolution, since the pre-realpath path itself looks perfectly
+// in-bounds). A candidate that doesn't exist yet can't be realpath'd; the
+// plain prefix check on the un-resolved candidate is the best available
+// signal in that case (the subsequent existsSync-based violation handles
+// "doesn't exist" separately either way).
+// ---------------------------------------------------------------------------
+
+const REALPATH_CACHE = new Map();
+function cachedRealpath(p) {
+  if (REALPATH_CACHE.has(p)) return REALPATH_CACHE.get(p);
+  let real;
+  try {
+    real = realpathSync(p);
+  } catch {
+    real = null;
+  }
+  REALPATH_CACHE.set(p, real);
+  return real;
+}
+
+function isPathContained(repoRoot, absCandidate) {
+  const withinPrefix = absCandidate === repoRoot || absCandidate.startsWith(repoRoot + sep);
+  if (!withinPrefix) return false;
+  if (!existsSync(absCandidate)) {
+    // Nothing to realpath yet (target doesn't exist) — the un-resolved
+    // prefix check above is the strongest signal available; a downstream
+    // existsSync-based violation reports "doesn't exist" separately.
+    return true;
+  }
+  const realCandidate = cachedRealpath(absCandidate);
+  const realRoot = cachedRealpath(repoRoot);
+  if (realCandidate === null || realRoot === null) return false;
+  return realCandidate === realRoot || realCandidate.startsWith(realRoot + sep);
 }
 
 function listScopedMarkdownFiles(repoRoot, config) {
@@ -175,6 +256,35 @@ function stripCodeForAnchorScan(text) {
     }
     line = line.replace(/``[^`]*``/g, (m) => " ".repeat(m.length));
     line = line.replace(/`[^`]*`/g, (m) => " ".repeat(m.length));
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+// Strips ONLY fenced ``` code blocks (not inline `code spans`, unlike
+// stripCodeForAnchorScan) — used before the CITATION_RE body scan and the
+// old-style-cite sweep, both of which scan the whole doc body with a
+// path-shaped regex. This is a ReDoS defense-in-depth measure alongside the
+// bounded PATH_RE_SRC above: large adversarial/incidental blobs (base64
+// data URIs, pasted hashes/logs) realistically live inside fences, and
+// skipping them removes the largest practical attack surface while still
+// scanning genuine inline citations (which are never fenced). Mirrors the
+// heading-anchor check's own fence-skipping discipline (stripCodeForAnchorScan),
+// applied here to the two other whole-body regex scans that lacked it.
+function stripFencedCodeBlocksOnly(text) {
+  const lines = text.split("\n");
+  let inFence = false;
+  const out = [];
+  for (const line of lines) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      out.push("");
+      continue;
+    }
+    if (inFence) {
+      out.push("");
+      continue;
+    }
     out.push(line);
   }
   return out.join("\n");
@@ -238,6 +348,12 @@ function checkHeadingAnchors(repoRoot, config, violations) {
       const fragment = target.slice(hashIdx + 1);
       if (/^https?:\/\//.test(targetRelPath)) continue;
       const targetAbs = resolve(dirname(absPath), targetRelPath);
+      if (!isPathContained(repoRoot, targetAbs)) {
+        violations.push(
+          `[heading-anchor] ${relPath}: link target "${targetRelPath}" resolves outside the repository root (blocked: path-traversal or symlink escape)`,
+        );
+        continue;
+      }
       if (!existsSync(targetAbs) || !statSync(targetAbs).isFile()) {
         violations.push(
           `[heading-anchor] ${relPath}: link target "${targetRelPath}" does not exist (linked as #${fragment})`,
@@ -308,6 +424,28 @@ function parseFrontmatter(text) {
     return { error: `unparseable frontmatter line: ${JSON.stringify(raw)}` };
   }
   return { data, bodyStartLine: end + 1 };
+}
+
+/** Pure, standalone frontmatter-well-formedness check (factored out of
+ *  main()'s file-scan loop so it's directly unit-testable in Layer 1
+ *  without needing a real file on disk — this is the exact logic that was
+ *  previously ONLY reachable via main()'s inline loop, which the self-test
+ *  never exercised with a bad fixture: it only round-tripped parseFrontmatter
+ *  itself, never asserted a violation is actually emitted for bad data).
+ *  Returns an array of violation-message SUFFIXES (caller prefixes with
+ *  `[frontmatter] <relPath>: `). */
+function checkFrontmatterWellFormedness(data) {
+  const violations = [];
+  if (!("covers" in data) || !Array.isArray(data.covers) || data.covers.length === 0) {
+    violations.push("`covers` must be a non-empty list");
+  }
+  if (!("related" in data) || !Array.isArray(data.related)) {
+    violations.push("`related` must be a list (may be empty [])");
+  }
+  if (!("status" in data) || (data.status !== "current" && data.status !== "historical")) {
+    violations.push(`\`status\` must be exactly "current" or "historical" (found ${JSON.stringify(data.status)})`);
+  }
+  return violations;
 }
 
 function stripQuotes(s) {
@@ -489,12 +627,35 @@ function extOf(path) {
   return idx === -1 ? "" : path.slice(idx);
 }
 
+/** Factored out of main() so it's directly testable (ReDoS timing self-test
+ *  below) without needing to invoke the whole file-scan pipeline. Bounded
+ *  leading class ({1,240}) — see PATH_RE_SRC's own comment for the same
+ *  ambiguous-prefix backtracking rationale this mirrors. */
+function buildOldStyleCiteRe(config) {
+  const extAlternation = config.knownCiteExtensions.map(escapeRegex).join("|");
+  return new RegExp(
+    "`?([\\w./@-]{1,240}\\.(?:" + extAlternation + ")):(\\d+(?:[-–]\\d+)?(?:,\\s*\\d+(?:[-–]\\d+)?)*)`?",
+    "g",
+  );
+}
+
+// NOTE (bug fix, aligned with PATH_RE_SRC/CITATION_RE which both include
+// `@` for scoped-package-shaped paths, e.g. `node_modules/@scope/pkg/...`):
+// this hand-rolled parser previously omitted `@`, so an `@`-containing
+// `covers` entry silently fell through the `return; // not a citation
+// shape` branch below and skipped file-exists/symbol-exists checking
+// entirely. Kept in sync with PATH_RE_SRC's character class deliberately —
+// see also `stripCiteSuffix` in doc-drift-status.mjs, which has the exact
+// same grammar and needed the same fix.
+const COVERS_CITATION_RE = /^([\w./@-]+\.\w+)\s§\s(.+)$/;
+const COVERS_BARE_PATH_RE = /^[\w./@-]+\.\w+$/;
+
 function checkOneCitation(repoRoot, config, relPath, context, citationText, violations, seenOut) {
-  const parsed = /^([\w./-]+\.\w+)\s§\s(.+)$/.exec(citationText.trim());
+  const parsed = COVERS_CITATION_RE.exec(citationText.trim());
   let path, symbol;
   if (parsed) {
     [, path, symbol] = parsed;
-  } else if (/^[\w./-]+\.\w+$/.test(citationText.trim())) {
+  } else if (COVERS_BARE_PATH_RE.test(citationText.trim())) {
     path = citationText.trim();
     symbol = null;
   } else {
@@ -503,8 +664,15 @@ function checkOneCitation(repoRoot, config, relPath, context, citationText, viol
 
   seenOut.push({ relPath, context, path, symbol });
 
-  const absTarget = join(repoRoot, path);
   if (isGeneratedPath(path, config)) return;
+
+  const absTarget = join(repoRoot, path);
+  if (!isPathContained(repoRoot, absTarget)) {
+    violations.push(
+      `[cited-file-exists] ${relPath} (${context}): "${path}" resolves outside the repository root (blocked: path-traversal or symlink escape)`,
+    );
+    return;
+  }
   if (!existsSync(absTarget)) {
     violations.push(`[cited-file-exists] ${relPath} (${context}): "${path}" does not exist`);
     return;
@@ -552,16 +720,8 @@ function main(repoRoot, config) {
       violations.push(`[frontmatter] ${relPath}: ${fm.error}`);
     } else {
       const data = fm.data;
-      if (!("covers" in data) || !Array.isArray(data.covers) || data.covers.length === 0) {
-        violations.push(`[frontmatter] ${relPath}: \`covers\` must be a non-empty list`);
-      }
-      if (!("related" in data) || !Array.isArray(data.related)) {
-        violations.push(`[frontmatter] ${relPath}: \`related\` must be a list (may be empty [])`);
-      }
-      if (!("status" in data) || (data.status !== "current" && data.status !== "historical")) {
-        violations.push(
-          `[frontmatter] ${relPath}: \`status\` must be exactly "current" or "historical" (found ${JSON.stringify(data.status)})`,
-        );
+      for (const fmViolation of checkFrontmatterWellFormedness(data)) {
+        violations.push(`[frontmatter] ${relPath}: ${fmViolation}`);
       }
       if (Array.isArray(data.covers)) {
         for (const entry of data.covers) {
@@ -570,9 +730,12 @@ function main(repoRoot, config) {
       }
     }
 
+    // Strip fenced code blocks before scanning (ReDoS defense-in-depth +
+    // avoids false-flagging an illustrative citation shown inside a fence).
+    const strippedBody = stripFencedCodeBlocksOnly(text);
     let m;
     const bodyRe = new RegExp(CITATION_RE.source, "g");
-    while ((m = bodyRe.exec(text))) {
+    while ((m = bodyRe.exec(strippedBody))) {
       const [full, path, symbol] = m;
       checkOneCitation(repoRoot, config, relPath, full, `${path} § ${symbol}`, violations, allCitationsSeen);
     }
@@ -618,15 +781,12 @@ function main(repoRoot, config) {
 
   // No-silent-leftovers: every literal `file.ext:NN`-shaped citation still
   // present anywhere in the scoped doc dirs must have a matching exception row.
-  const extAlternation = config.knownCiteExtensions.map(escapeRegex).join("|");
-  const oldStyleCiteRe = new RegExp(
-    "`?([\\w./@-]+\\.(?:" + extAlternation + ")):(\\d+(?:[-–]\\d+)?(?:,\\s*\\d+(?:[-–]\\d+)?)*)`?",
-    "g",
-  );
+  // Fenced-code stripped before the scan (below) — ReDoS defense-in-depth.
+  const oldStyleCiteRe = buildOldStyleCiteRe(config);
   const exceptionTexts = new Set(exceptionRows.map((r) => r.citeText));
   for (const relPath of files) {
     const absPath = join(repoRoot, relPath);
-    const text = readFileSync(absPath, "utf8");
+    const text = stripFencedCodeBlocksOnly(readFileSync(absPath, "utf8"));
     let m;
     const re = new RegExp(oldStyleCiteRe.source, "g");
     while ((m = re.exec(text))) {
@@ -771,6 +931,84 @@ function runSelfTestLayer1() {
     assert(got === expected, `githubHeadingSlug(${JSON.stringify(heading)}) = ${JSON.stringify(got)}, expected ${JSON.stringify(expected)}`);
   }
 
+  // 8. Frontmatter WELL-FORMEDNESS VIOLATIONS (impl-audit finding B1 — the
+  // parser round-trip above (item 6) never asserted a violation actually
+  // fires for bad data; this drives the real, standalone
+  // checkFrontmatterWellFormedness() — the same function main() calls —
+  // against each independently-bad fixture and asserts the right, and ONLY
+  // the right, violation is produced).
+  const goodData = { covers: ["src/x.ts § foo"], related: [], status: "current" };
+  assert(
+    checkFrontmatterWellFormedness(goodData).length === 0,
+    `a well-formed frontmatter object produced unexpected violations: ${JSON.stringify(checkFrontmatterWellFormedness(goodData))}`,
+  );
+  const emptyCoversData = { covers: [], related: [], status: "current" };
+  const emptyCoversViolations = checkFrontmatterWellFormedness(emptyCoversData);
+  assert(
+    emptyCoversViolations.some((v) => v.includes("`covers` must be a non-empty list")),
+    `an empty \`covers\` list did not produce the expected violation: ${JSON.stringify(emptyCoversViolations)}`,
+  );
+  const nonListRelatedData = { covers: ["src/x.ts"], related: "not-a-list", status: "current" };
+  const nonListRelatedViolations = checkFrontmatterWellFormedness(nonListRelatedData);
+  assert(
+    nonListRelatedViolations.some((v) => v.includes("`related` must be a list")),
+    `a non-list \`related\` did not produce the expected violation: ${JSON.stringify(nonListRelatedViolations)}`,
+  );
+  const badStatusData = { covers: ["src/x.ts"], related: [], status: "bogus-value" };
+  const badStatusViolations = checkFrontmatterWellFormedness(badStatusData);
+  assert(
+    badStatusViolations.some((v) => v.includes('must be exactly "current" or "historical"') && v.includes("bogus-value")),
+    `an invalid \`status\` value did not produce the expected violation: ${JSON.stringify(badStatusViolations)}`,
+  );
+
+  // 9. `@`-in-path regex alignment (impl-audit real-bug finding). Both the
+  // covers-entry parser (COVERS_CITATION_RE) and the body-citation grammar
+  // (CITATION_RE, via PATH_RE_SRC) must accept a scoped-package-shaped path
+  // (e.g. `node_modules/@scope/pkg/index.ts`) — previously the covers
+  // parser silently omitted `@`, so such an entry fell through
+  // "not a citation shape" and was never file/symbol-checked at all.
+  const scopedPkgCoversText = "node_modules/@scope/pkg/index.ts § someExport";
+  const coversParsed = COVERS_CITATION_RE.exec(scopedPkgCoversText);
+  assert(
+    coversParsed !== null && coversParsed[1] === "node_modules/@scope/pkg/index.ts" && coversParsed[2] === "someExport",
+    `COVERS_CITATION_RE failed to parse an @-scoped-package path as a citation: ${JSON.stringify(coversParsed)}`,
+  );
+  const bodyReForAt = new RegExp(CITATION_RE.source, "g");
+  const bodyAtMatches = [...`see (${scopedPkgCoversText}) here`.matchAll(bodyReForAt)];
+  assert(
+    bodyAtMatches.length === 1 && bodyAtMatches[0][1] === "node_modules/@scope/pkg/index.ts",
+    `CITATION_RE failed to parse an @-scoped-package path in body text: ${JSON.stringify(bodyAtMatches)}`,
+  );
+
+  // 10. ReDoS bound — a large adversarial (all path-class chars, no dot,
+  // so no possible match) input must complete in bounded time against BOTH
+  // whole-body regexes, proving the {1,240}-capped PATH_RE_SRC / old-style-
+  // cite leading class prevents the O(n^2) backtracking blowup the
+  // original unbounded `[\w./@-]+\.\w+` shape exhibited (measured 53s on a
+  // 128k adversarial blob pre-fix; this asserts well under 3s on a larger,
+  // 200k input post-fix — generous headroom against slow/loaded CI runners
+  // while still proving no quadratic blowup survived).
+  {
+    const adversarial = "0123456789abcdef".repeat(12_500); // 200,000 chars, no '.', in-class throughout
+    const start = Date.now();
+    const re1 = new RegExp(CITATION_RE.source, "g");
+    [...adversarial.matchAll(re1)];
+    const elapsed1 = Date.now() - start;
+    assert(
+      elapsed1 < 3000,
+      `CITATION_RE took ${elapsed1}ms against a 200k-char adversarial input (expected <3000ms, bounded) — possible ReDoS regression`,
+    );
+
+    const start2 = Date.now();
+    const re2 = buildOldStyleCiteRe(DEFAULT_CONFIG);
+    [...adversarial.matchAll(re2)];
+    const elapsed2 = Date.now() - start2;
+    assert(
+      elapsed2 < 3000,
+      `the old-style-cite regex took ${elapsed2}ms against a 200k-char adversarial input (expected <3000ms, bounded) — possible ReDoS regression`,
+    );
+  }
+
   console.log("check-doc-cites --self-test: Layer 1 (pure-function) — all assertions passed.");
 }
 
@@ -823,15 +1061,315 @@ function runSelfTestLayer2() {
     violations = main(scratchRoot, config);
     assert(violations.length === 0, `Layer 2 GREEN (post-revert) case unexpectedly failed: ${JSON.stringify(violations)}`);
 
+    // --- impl-audit finding: cite-resolves (cited-file-exists) had ZERO
+    // self-test coverage — the RED case above only ever exercised the
+    // symbol-existence branch (the target file always existed). Add a
+    // dedicated fixture citing a path that does not exist at all.
+    writeFileSync(
+      readmePath,
+      '---\ncovers:\n  - "thing.ts § realSymbol"\n  - "does-not-exist.ts"\nrelated: []\nstatus: current\n---\n\n# Area\n\nSee (thing.ts § realSymbol) for details.\n',
+      "utf8",
+    );
+    violations = main(scratchRoot, config);
+    const hasCiteResolvesViolation = violations.some(
+      (v) => v.startsWith("[cited-file-exists]") && v.includes("does-not-exist.ts") && v.includes("does not exist"),
+    );
+    assert(
+      hasCiteResolvesViolation,
+      `cite-resolves guard did not fire for a covers entry citing a nonexistent file: ${JSON.stringify(violations)}`,
+    );
+    // Revert.
+    writeFileSync(
+      readmePath,
+      '---\ncovers:\n  - "thing.ts § realSymbol"\nrelated: []\nstatus: current\n---\n\n# Area\n\nSee (thing.ts § realSymbol) for details.\n',
+      "utf8",
+    );
+    violations = main(scratchRoot, config);
+    assert(violations.length === 0, `post-cite-resolves-test revert unexpectedly failed: ${JSON.stringify(violations)}`);
+
+    // --- impl-audit finding: frontmatter well-formedness had no
+    // execution-path coverage through the REAL main() pipeline (Layer 1
+    // item 8 tests checkFrontmatterWellFormedness() directly; this proves
+    // main() actually calls it and surfaces the violation end-to-end).
+    writeFileSync(
+      readmePath,
+      '---\ncovers:\n  - "thing.ts § realSymbol"\nrelated: []\nstatus: bogus-value\n---\n\n# Area\n\nSee (thing.ts § realSymbol) for details.\n',
+      "utf8",
+    );
+    violations = main(scratchRoot, config);
+    const hasFrontmatterViolation = violations.some(
+      (v) => v.startsWith("[frontmatter]") && v.includes("bogus-value"),
+    );
+    assert(
+      hasFrontmatterViolation,
+      `main() did not surface a [frontmatter] violation for an invalid status value: ${JSON.stringify(violations)}`,
+    );
+    // Revert.
+    writeFileSync(
+      readmePath,
+      '---\ncovers:\n  - "thing.ts § realSymbol"\nrelated: []\nstatus: current\n---\n\n# Area\n\nSee (thing.ts § realSymbol) for details.\n',
+      "utf8",
+    );
+    violations = main(scratchRoot, config);
+    assert(violations.length === 0, `post-frontmatter-test revert unexpectedly failed: ${JSON.stringify(violations)}`);
+
+    // --- impl-audit finding: `@`-in-path — end-to-end proof that a
+    // scoped-package-shaped covers entry is no longer silently skipped
+    // (previously fell through "not a citation shape" and produced zero
+    // violations even for a nonexistent target).
+    writeFileSync(
+      readmePath,
+      '---\ncovers:\n  - "thing.ts § realSymbol"\n  - "node_modules/@scope/pkg/does-not-exist.ts"\nrelated: []\nstatus: current\n---\n\n# Area\n\nSee (thing.ts § realSymbol) for details.\n',
+      "utf8",
+    );
+    violations = main(scratchRoot, config);
+    const hasAtPathViolation = violations.some(
+      (v) => v.startsWith("[cited-file-exists]") && v.includes("node_modules/@scope/pkg/does-not-exist.ts"),
+    );
+    assert(
+      hasAtPathViolation,
+      `an @-scoped-package covers entry citing a nonexistent file was silently skipped instead of producing a [cited-file-exists] violation: ${JSON.stringify(violations)}`,
+    );
+    // Revert.
+    writeFileSync(
+      readmePath,
+      '---\ncovers:\n  - "thing.ts § realSymbol"\nrelated: []\nstatus: current\n---\n\n# Area\n\nSee (thing.ts § realSymbol) for details.\n',
+      "utf8",
+    );
+    violations = main(scratchRoot, config);
+    assert(violations.length === 0, `post-@-path-test revert unexpectedly failed: ${JSON.stringify(violations)}`);
+
     console.log("check-doc-cites --self-test: Layer 2 (real-filesystem RED/GREEN) — passed.");
   } finally {
     rmSync(scratchRoot, { recursive: true, force: true });
   }
 }
 
+/** Impl-audit finding: `checkHeadingAnchors`'s end-to-end detection path had
+ *  ZERO self-test coverage (only the pure `githubHeadingSlug()` function was
+ *  tested). Builds a real scratch repo with `headingSlugAlgorithm: "github"`,
+ *  a real heading, and a real cross-doc `[text](./other.md#fragment)` link;
+ *  asserts PASS while the link is valid, then RED once the heading is
+ *  renamed (the exact "heading rewrite breaks an inbound anchor" hazard the
+ *  acceptance criteria names by name), then GREEN again once reverted. */
+function runSelfTestLayer2HeadingAnchorEndToEnd() {
+  const scratchRoot = mkdtempSync(join(tmpdir(), "check-doc-cites-selftest-heading-"));
+  try {
+    const docsAreaDir = join(scratchRoot, "docs", "area");
+    mkdirSync(docsAreaDir, { recursive: true });
+
+    const targetPath = join(docsAreaDir, "target.md");
+    writeFileSync(
+      targetPath,
+      '---\ncovers:\n  - "thing.ts"\nrelated: []\nstatus: current\n---\n\n## Old Heading Name\n\nBody.\n',
+      "utf8",
+    );
+    const srcFile = join(scratchRoot, "thing.ts");
+    writeFileSync(srcFile, "export function realSymbol() {}\n", "utf8");
+
+    const citingPath = join(docsAreaDir, "README.md");
+    writeFileSync(
+      citingPath,
+      '---\ncovers:\n  - "thing.ts"\nrelated: []\nstatus: current\n---\n\n# Area\n\nSee [target](./target.md#old-heading-name) for details.\n',
+      "utf8",
+    );
+
+    const config = {
+      ...DEFAULT_CONFIG,
+      scopedDocDirs: ["docs/area"],
+      docsRoot: "docs",
+      headingSlugAlgorithm: "github",
+    };
+
+    // PASS case — the link's fragment matches the target heading's real slug.
+    let violations = main(scratchRoot, config);
+    assert(
+      !violations.some((v) => v.startsWith("[heading-anchor]")),
+      `heading-anchor PASS case unexpectedly produced a violation: ${JSON.stringify(violations)}`,
+    );
+
+    // RED case — rename the heading (simulating a citation-conversion pass
+    // that rewrites headings, exactly the hazard the criteria names), which
+    // silently changes its GitHub-rendered anchor slug and breaks the
+    // inbound link — assert the check catches it.
+    writeFileSync(
+      targetPath,
+      '---\ncovers:\n  - "thing.ts"\nrelated: []\nstatus: current\n---\n\n## New Renamed Heading\n\nBody.\n',
+      "utf8",
+    );
+    violations = main(scratchRoot, config);
+    const hasHeadingViolation = violations.some(
+      (v) => v.startsWith("[heading-anchor]") && v.includes("old-heading-name") && v.includes("target.md"),
+    );
+    assert(
+      hasHeadingViolation,
+      `heading-anchor check did not fire after the target heading was renamed: ${JSON.stringify(violations)}`,
+    );
+
+    // GREEN case — fix the citing link's fragment to the new slug, revert.
+    writeFileSync(
+      citingPath,
+      '---\ncovers:\n  - "thing.ts"\nrelated: []\nstatus: current\n---\n\n# Area\n\nSee [target](./target.md#new-renamed-heading) for details.\n',
+      "utf8",
+    );
+    violations = main(scratchRoot, config);
+    assert(
+      !violations.some((v) => v.startsWith("[heading-anchor]")),
+      `heading-anchor GREEN (post-fix) case unexpectedly produced a violation: ${JSON.stringify(violations)}`,
+    );
+
+    // Also confirm the no-op behavior when headingSlugAlgorithm is "none"
+    // (a stale link would otherwise be silently unreported, which is the
+    // intended, documented "skip, don't guess" v1 behavior for non-GitHub
+    // remotes — reset the citing link back to the STALE fragment first so
+    // this genuinely proves the check is a no-op, not incidentally still green).
+    writeFileSync(
+      citingPath,
+      '---\ncovers:\n  - "thing.ts"\nrelated: []\nstatus: current\n---\n\n# Area\n\nSee [target](./target.md#old-heading-name) for details.\n',
+      "utf8",
+    );
+    const noneConfig = { ...config, headingSlugAlgorithm: "none" };
+    violations = main(scratchRoot, noneConfig);
+    assert(
+      !violations.some((v) => v.startsWith("[heading-anchor]")),
+      `headingSlugAlgorithm: "none" should disable the heading-anchor check entirely (no-op), but it fired: ${JSON.stringify(violations)}`,
+    );
+
+    console.log("check-doc-cites --self-test: Layer 2b (heading-anchor end-to-end RED/GREEN) — passed.");
+  } finally {
+    rmSync(scratchRoot, { recursive: true, force: true });
+  }
+}
+
+/** Impl-audit safety finding (BLOCKER 1): path-traversal / symlink-escape
+ *  containment had ZERO self-test coverage. Proves all three vectors the
+ *  audit demonstrated are now blocked: a `../`-escaping covers citation, a
+ *  `../`-escaping heading-anchor link, and an in-repo symlink pointing
+ *  outside the repo (no `..` in doc text at all). Each must produce a
+ *  violation naming the escape attempt, never a silent PASS. */
+function runSelfTestLayer2PathTraversal() {
+  const scratchRoot = mkdtempSync(join(tmpdir(), "check-doc-cites-selftest-traversal-"));
+  const outsideRoot = mkdtempSync(join(tmpdir(), "check-doc-cites-selftest-outside-"));
+  try {
+    const docsAreaDir = join(scratchRoot, "docs", "area");
+    mkdirSync(docsAreaDir, { recursive: true });
+
+    // A "secret" file OUTSIDE the scratch repo entirely.
+    const outsideSecretPath = join(outsideRoot, "secret.ts");
+    writeFileSync(outsideSecretPath, "export const OUTSIDE_TOKEN = 1;\n", "utf8");
+    const outsideSecretMdPath = join(outsideRoot, "secret-notes.md");
+    writeFileSync(outsideSecretMdPath, "## Totally Fine Heading\n\nNothing to see.\n", "utf8");
+
+    const config = {
+      ...DEFAULT_CONFIG,
+      scopedDocDirs: ["docs/area"],
+      docsRoot: "docs",
+      headingSlugAlgorithm: "github",
+    };
+
+    // Vector 1: `../`-escaping covers citation reading real content outside
+    // the repo. Compute a relative `../../../...` path from the scratch
+    // repo root to the outside secret file (depth-agnostic, robust to
+    // os.tmpdir()'s actual nesting depth).
+    const relEscape = relativeEscapePath(scratchRoot, outsideSecretPath);
+    const citingPath = join(docsAreaDir, "README.md");
+    writeFileSync(
+      citingPath,
+      `---\ncovers:\n  - "${relEscape} § OUTSIDE_TOKEN"\nrelated: []\nstatus: current\n---\n\n# Area\n\nBody.\n`,
+      "utf8",
+    );
+    let violations = main(scratchRoot, config);
+    const blockedCitation = violations.some(
+      (v) => v.startsWith("[cited-file-exists]") && v.includes("resolves outside the repository root"),
+    );
+    assert(
+      blockedCitation,
+      `a \`../\`-escaping covers citation was NOT blocked (path-traversal vulnerability): ${JSON.stringify(violations)}`,
+    );
+    assert(
+      !violations.some((v) => v.includes("OUTSIDE_TOKEN") && v.startsWith("[symbol-appears-in-file]")),
+      `the escaping citation reached symbol-existence checking against the outside file — containment check did not stop it early enough`,
+    );
+
+    // Vector 2: `../`-escaping heading-anchor link. The heading-anchor
+    // resolver bases relative link targets on `dirname(<citing doc's abs
+    // path>)` (docsAreaDir), NOT the repo root — so the escape path must be
+    // computed relative to docsAreaDir, not scratchRoot.
+    const relEscapeMd = relativeEscapePath(docsAreaDir, outsideSecretMdPath);
+    writeFileSync(
+      citingPath,
+      `---\ncovers:\n  - "thing-placeholder.ts"\nrelated: []\nstatus: current\n---\n\n# Area\n\nSee [x](${relEscapeMd}#totally-fine-heading) for details.\n`,
+      "utf8",
+    );
+    // (thing-placeholder.ts doesn't need to exist for this vector — the
+    // heading-anchor violation is what's under test; suppress the unrelated
+    // cited-file-exists noise by checking only for the heading-anchor one.)
+    violations = main(scratchRoot, config);
+    const blockedHeading = violations.some(
+      (v) => v.startsWith("[heading-anchor]") && v.includes("resolves outside the repository root"),
+    );
+    assert(
+      blockedHeading,
+      `a \`../\`-escaping heading-anchor link was NOT blocked (path-traversal vulnerability): ${JSON.stringify(violations)}`,
+    );
+
+    // Vector 3: an IN-REPO symlink pointing outside the repo (no `..` in
+    // doc text at all — proves the fix is a real containment/realpath
+    // check, not merely "reject literal `..`").
+    const symlinkPath = join(scratchRoot, "inside-symlink-secret.ts");
+    try {
+      symlinkSync(outsideSecretPath, symlinkPath);
+    } catch (e) {
+      // Symlink creation can fail in some sandboxed/restricted environments
+      // (e.g. no CAP_SYMLINK on some CI runners) — skip this one vector
+      // rather than fail the whole suite on an environment limitation, but
+      // say so loudly rather than silently passing.
+      console.error(
+        `check-doc-cites --self-test: WARNING — could not create a symlink in this environment (${e.message}); skipping the symlink-escape vector of the path-traversal self-test. Vectors 1 and 2 (../-escape for citations and heading-anchors) still ran and passed.`,
+      );
+      writeFileSync(
+        citingPath,
+        '---\ncovers:\n  - "thing-placeholder.ts"\nrelated: []\nstatus: current\n---\n\n# Area\n\nBody.\n',
+        "utf8",
+      );
+      console.log("check-doc-cites --self-test: Layer 2c (path-traversal containment) — passed (2/3 vectors; symlink unavailable in this environment).");
+      return;
+    }
+    writeFileSync(
+      citingPath,
+      '---\ncovers:\n  - "inside-symlink-secret.ts § OUTSIDE_TOKEN"\nrelated: []\nstatus: current\n---\n\n# Area\n\nBody.\n',
+      "utf8",
+    );
+    violations = main(scratchRoot, config);
+    const blockedSymlink = violations.some(
+      (v) => v.startsWith("[cited-file-exists]") && v.includes("inside-symlink-secret.ts") && v.includes("resolves outside the repository root"),
+    );
+    assert(
+      blockedSymlink,
+      `an in-repo symlink pointing outside the repo was NOT blocked (symlink-escape vulnerability): ${JSON.stringify(violations)}`,
+    );
+
+    console.log("check-doc-cites --self-test: Layer 2c (path-traversal containment, all 3 vectors) — passed.");
+  } finally {
+    rmSync(scratchRoot, { recursive: true, force: true });
+    rmSync(outsideRoot, { recursive: true, force: true });
+  }
+}
+
+/** Builds a `../`-chained relative path from `fromDir` to `targetAbsPath`,
+ *  independent of how deeply `fromDir` happens to be nested under
+ *  os.tmpdir() on this machine (self-test-only helper). */
+function relativeEscapePath(fromDir, targetAbsPath) {
+  const depth = fromDir.split(sep).filter(Boolean).length;
+  const ups = Array.from({ length: depth + 1 }, () => "..").join("/");
+  return `${ups}${targetAbsPath}`;
+}
+
 function runSelfTest() {
   runSelfTestLayer1();
   runSelfTestLayer2();
+  runSelfTestLayer2HeadingAnchorEndToEnd();
+  runSelfTestLayer2PathTraversal();
   console.log("check-doc-cites --self-test: ALL LAYERS PASSED.");
 }
 
@@ -845,8 +1383,9 @@ if (args.includes("--self-test")) {
   process.exit(0);
 }
 
-const REPO_ROOT = resolve(__dirname, "..");
 const config = loadConfig();
+assertScriptInstallDirIsSingleSegment(config);
+const REPO_ROOT = resolve(__dirname, "..");
 const violations = main(REPO_ROOT, config);
 if (violations.length > 0) {
   console.error(`check-doc-cites: FAIL — ${violations.length} violation(s):\n`);
