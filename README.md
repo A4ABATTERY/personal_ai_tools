@@ -54,13 +54,14 @@ disable, or remove installed plugins.
 
 ### `codebase-docs`
 
-Three skills for working in a tiered-docs codebase:
+Four skills for working in a tiered-docs codebase:
 
 | Skill | What it does |
 |-------|--------------|
 | **codebase-context** | Wayfinding. A grep-first orientation protocol that finds where things live faster than blind grepping, reuses existing patterns, and **always reports code↔doc drift** — even when you didn't ask. Written to trigger proactively at the start of substantive work. |
 | **doc-maintenance** | The orchestration process for creating/updating the tiered docs (`docs/` — L0 `LLM_MAP.md`, L1 READMEs, L2 deep-dives). Dispatches sub-agents (explore → verify+write → audit), then lints and commits. |
 | **docs-init-or-improve** | The whole-repo front door. Fires when a project is **undocumented** (sets up the tiered-docs convention from scratch) or when the docs are **stale/inconsistent** and need a cleanup or consistency check. It assesses state, bootstraps `docs/STRUCTURE.md` + a seed `docs/LLM_MAP.md`, then hands off to `doc-maintenance`. |
+| **docs-migrate** | Migration. Converts an existing tiered-docs repo from an old `file.ext:NN` line-cite convention to the `§ symbol` convention + frontmatter + an installed lint. Invoke once per repo; `docs-init-or-improve` routes here automatically when it detects the old convention. |
 
 Install: `/plugin install codebase-docs@personal-ai-tools`
 
@@ -132,11 +133,19 @@ Commit and push. Re-install with `/plugin marketplace update personal-ai-tools`,
     ├── codebase-docs/
     │   ├── .claude-plugin/
     │   │   └── plugin.json
+    │   ├── assets/doc-conventions/        # shared bundle: installed by docs-init-or-improve + docs-migrate
+    │   │   ├── check-doc-cites.mjs                    # the citation-lint engine (generic, config-driven)
+    │   │   ├── doc-cite-config.template.json
+    │   │   ├── doc-cite-exceptions.template.tsv
+    │   │   ├── doc-drift-status.mjs                   # report-only-by-default drift-detection tool
+    │   │   ├── STRUCTURE-citation-section.template.md # the ONE canonical copy of the citation-conventions prose
+    │   │   └── HANDOFF.template.md                    # context-budget handoff artifact template
     │   └── skills/
     │       ├── codebase-context/SKILL.md
     │       ├── docs-init-or-improve/        # whole-repo front door: init or clean-up
     │       │   ├── SKILL.md
     │       │   └── assets/STRUCTURE.template.md
+    │       ├── docs-migrate/SKILL.md        # migrates an existing repo onto the citation/frontmatter convention
     │       └── doc-maintenance/
     │           ├── SKILL.md
     │           ├── scripts/doc_lint.py
