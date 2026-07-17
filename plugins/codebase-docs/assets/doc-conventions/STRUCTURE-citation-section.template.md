@@ -16,8 +16,8 @@ convention (line numbers drift the moment the cited file is edited; a symbol nam
   scope (`src/widgets/Panel.tsx § PanelProvider.confirmClose`), a JSON/YAML key-path for a config file
   (`package.json § scripts["build"]`, `.github/workflows/ci.yml § jobs.test.steps["Lint"]`), or a
   data-layer anchor for a schema/table declared as an object key rather than a `const`/`function`
-  (`db/schema.sql § orders`, or a `defineTable`/ORM-model-style key — see the `extraDeclarationPatterns`
-  escape hatch below for how a repo teaches the lint its own declaration idioms). Multiple line numbers
+  (`db/schema.sql § orders`, or an ORM-model-style key — see the `extraDeclarationPatterns` escape hatch
+  below for how a repo teaches the lint its own declaration idioms). Multiple line numbers
   for the same symbol collapse to ONE anchor; a range spanning several small symbols collapses to a
   comma-separated list of anchors, never a re-invented numeric range.
 - **True line-only exceptions** — when no stable anchor exists (a bare `RUN` instruction, a specific

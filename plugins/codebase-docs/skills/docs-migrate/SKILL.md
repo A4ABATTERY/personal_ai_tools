@@ -95,17 +95,27 @@ Copy three files from the shared asset folder into the target repo:
    repo's script directory. Choose that directory with this rule: (a) if a `doc-cite-config.json` already
    exists with `_scriptInstallDir` set, use that value — this IS the override surface, never re-decide once
    present; (b) otherwise, if a `scripts/` directory already exists at the repo root, use it; (c) otherwise,
-   create `scripts/`. Before writing, replace the file's `{{PLUGIN_ASSET_VERSION}}` placeholder (in its
+   create `scripts/`. **`_scriptInstallDir` MUST be a single path segment directly under the repo root**
+   (e.g. `scripts`, `tools`) — **never a nested path** (e.g. `packages/foo/scripts`, as a monorepo layout
+   might otherwise suggest). Both shipped scripts compute their own repo root as exactly one directory above
+   their own install location; a nested install directory would silently miscompute that root, and every
+   `scopedDocDirs`/`docsRoot`-relative path — including the path-containment security check — would then
+   resolve against the wrong boundary. Both scripts refuse to run (loud error, exit 1) if
+   `_scriptInstallDir` contains a path separator, so a violation of this rule fails fast rather than
+   silently miscomputing. Before writing, replace the file's `{{PLUGIN_ASSET_VERSION}}` placeholder (in its
    header comment) with the shipping plugin's own version string — a mechanical, literal substitution, not
    a hand-edit of the script's logic.
 2. **A freshly generated `doc-cite-config.json`** (not the bare template) — read `docs/STRUCTURE.md`'s
    "substantive areas" table to fill `scopedDocDirs`; set `docsRoot` to this repo's actual docs root; detect
    `headingSlugAlgorithm` by checking `git remote get-url origin` for a `github.com` host (if the remote is
-   absent, unrecognized, or not GitHub, set `"none"` and print a one-line note — never silently default to
-   `"github"` and risk false-positive reports on a non-GitHub repo); leave `extraDeclarationPatterns: []`
-   unless STEP 2's decision-tree walk discovers a repo-specific declaration shape that needs one (see STEP
-   2, rule with the escape hatch); record the chosen script directory into `_scriptInstallDir`; record the
-   shipping plugin's version into `_pluginAssetVersion`.
+   absent, unrecognized, or not GitHub, set `"none"` and print a one-line note naming ONLY the detected host
+   (e.g. "non-GitHub remote host: gitlab.example.com") — **never print or log the full remote URL**, which
+   can carry an embedded credential/token on some CI/deploy-key setups (`https://user:token@host/...`);
+   never silently default to `"github"` and risk false-positive reports on a non-GitHub repo); leave
+   `extraDeclarationPatterns: []` unless STEP 2's decision-tree walk discovers a repo-specific declaration
+   shape that needs one (see STEP 2, rule with the escape hatch); record the chosen script directory (a
+   single path segment, per the constraint above) into `_scriptInstallDir`; record the shipping plugin's
+   version into `_pluginAssetVersion`.
 3. **The exceptions TSV** — copy `doc-cite-exceptions.template.tsv` (header row only) to the same script
    directory, unless one already exists there (don't clobber real exception rows on a re-run).
 
