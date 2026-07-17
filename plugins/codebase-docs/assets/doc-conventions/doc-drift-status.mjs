@@ -49,7 +49,7 @@ import {
   rmSync,
   readdirSync,
 } from "node:fs";
-import { join, dirname, resolve } from "node:path";
+import { join, dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -78,6 +78,26 @@ function loadConfig() {
       `doc-drift-status: doc-cite-config.json failed to parse (${e.message}) — falling back to built-in defaults`,
     );
     return { ...DEFAULT_CONFIG, ...DEFAULT_THRESHOLDS };
+  }
+}
+
+/** Same invariant/rationale as check-doc-cites.mjs's identically-named
+ *  function (kept in sync deliberately, not shared via import — these two
+ *  scripts are each installed standalone, byte-for-byte, with no relative
+ *  import between them): `_scriptInstallDir` must be a single path segment
+ *  directly under the repo root, since REPO_ROOT is computed as one level
+ *  above this script's own install location. A nested value would silently
+ *  miscompute REPO_ROOT for every `scopedDocDirs`/`docsRoot`-relative
+ *  lookup this script performs. */
+function assertScriptInstallDirIsSingleSegment(config) {
+  const val = config._scriptInstallDir;
+  if (typeof val !== "string" || val === "") return;
+  if (val.includes("/") || val.includes("\\")) {
+    console.error(
+      `doc-drift-status: doc-cite-config.json's "_scriptInstallDir" ("${val}") contains a path separator — ` +
+        `only a single directory name directly under the repo root is supported. Refusing to run.`,
+    );
+    process.exit(1);
   }
 }
 
@@ -220,7 +240,21 @@ function isShallowRepo(repoRoot) {
  *  BEFORE any timestamp comparison happens, per the design's §4.2 case
  *  table. Returns { case: "normal"|"deletedTracked"|"neverExisted"|"untracked", hash, ts }. */
 function resolvePathHistory(repoRoot, relPath) {
-  const absExists = existsSync(join(repoRoot, relPath));
+  // Containment hardening (defense-in-depth, impl-audit safety finding):
+  // `git log -- <relPath>` already refuses pathspecs that resolve outside
+  // the repository (a `../`-escaping relPath produces git's own "outside
+  // repository" error, caught by `git()` below as empty output — this is
+  // ALREADY safe, incidentally, as a side effect of using git as the read
+  // path rather than a raw fs call). But the plain `existsSync(join(...))`
+  // existence check on the line below is NOT git-mediated, so it still
+  // leaks a weak "does this out-of-repo path exist" boolean oracle for a
+  // `../`-escaping covers entry. Route an out-of-bounds path straight to
+  // "neverExisted" (never let its real on-disk existence influence the
+  // verdict) rather than performing the existsSync check against it at all.
+  const joined = join(repoRoot, relPath);
+  const withinRepo = joined === repoRoot || joined.startsWith(repoRoot + sep);
+  if (!withinRepo) return { case: "neverExisted" };
+  const absExists = existsSync(joined);
   const out = git(repoRoot, ["log", "-1", "--follow", "--format=%H%x09%ct", "--", relPath]).trim();
   const hasHistory = out.length > 0;
   if (absExists && hasHistory) {
@@ -346,8 +380,16 @@ function listScopedMarkdownFiles(repoRoot, config) {
   return files.sort();
 }
 
+// NOTE (bug fix): aligned with check-doc-cites.mjs's PATH_RE_SRC/
+// COVERS_CITATION_RE, which both include `@` for scoped-package-shaped
+// paths (e.g. `node_modules/@scope/pkg/...`). Previously this regex omitted
+// `@`, so an `@`-containing `covers` entry was NOT stripped to its bare
+// path — the entire raw string (path + ` § ` + symbol) was treated as "the
+// path," producing a garbled integrityIssues message with a space and a
+// `§` character embedded in what's reported as a file path.
+const STRIP_CITE_SUFFIX_RE = /^([\w./@-]+\.\w+)\s§\s.+$/;
 function stripCiteSuffix(coversEntry) {
-  const m = /^([\w./-]+\.\w+)\s§\s.+$/.exec(coversEntry.trim());
+  const m = STRIP_CITE_SUFFIX_RE.exec(coversEntry.trim());
   return m ? m[1] : coversEntry.trim();
 }
 
@@ -429,6 +471,31 @@ function runL3Drift(repoRoot, config, docs, integrityIssues, historicalOut) {
   return results;
 }
 
+/** The MINOR/MAJOR classification ladder (criteria Deliverable 2, item 2) —
+ *  factored out as its OWN function, called by `runL1L2Drift` below, so the
+ *  self-test can assert against this EXACT function (not a disconnected
+ *  reimplementation that could silently diverge from what the production
+ *  code path actually runs — the impl-audit's most severe finding was that
+ *  the self-test previously tested a hand-duplicated closure that could
+ *  never detect a bug in this real ladder). Returns `"trivial"|"minor"|"major"`.
+ *  `linesChanged === 0` is the caller's responsibility (means "no drift on
+ *  this axis at all," not a verdict) and is handled by the caller before
+ *  this is ever invoked. */
+function classifyL1L2Change(linesChanged, currentLineCount, config) {
+  const pctChanged = (100 * linesChanged) / Math.max(currentLineCount, 1);
+  let verdict;
+  if (linesChanged < config.minAbsoluteLinesChanged) {
+    verdict = "trivial";
+  } else if (pctChanged >= config.l2MajorPct) {
+    verdict = "major";
+  } else if (pctChanged >= config.l2MinorPct) {
+    verdict = "minor";
+  } else {
+    verdict = "trivial";
+  }
+  return { verdict, pctChanged };
+}
+
 function runL1L2Drift(repoRoot, config, docs, integrityIssues) {
   const results = [];
   const docSet = new Set(docs);
@@ -440,20 +507,9 @@ function runL1L2Drift(repoRoot, config, docs, integrityIssues) {
     if (!l1Info) continue;
     const sinceExclusive = l1Info.ts + 1;
     const linesChanged = linesChangedSince(repoRoot, relDoc, sinceExclusive);
+    if (linesChanged === 0) continue; // no commit on D2 after D1 at all -> no drift on this axis
     const currentLineCount = readFileSync(join(repoRoot, relDoc), "utf8").split(/\r?\n/).length;
-    const pctChanged = (100 * linesChanged) / Math.max(currentLineCount, 1);
-    let verdict;
-    if (linesChanged === 0) {
-      continue; // no commit on D2 after D1 at all -> no drift on this axis
-    } else if (linesChanged < config.minAbsoluteLinesChanged) {
-      verdict = "trivial";
-    } else if (pctChanged >= config.l2MajorPct) {
-      verdict = "major";
-    } else if (pctChanged >= config.l2MinorPct) {
-      verdict = "minor";
-    } else {
-      verdict = "trivial";
-    }
+    const { verdict, pctChanged } = classifyL1L2Change(linesChanged, currentLineCount, config);
     results.push({
       l2: relDoc,
       l1,
@@ -554,16 +610,15 @@ function assert(cond, msg) {
 }
 
 function runSelfTestLayer1() {
-  // %-changed math + threshold classification.
+  // %-changed math + threshold classification — impl-audit finding B2/#7:
+  // this now calls `classifyL1L2Change` DIRECTLY (the exact function
+  // `runL1L2Drift` — the real production code path — calls), not a
+  // hand-duplicated closure that could silently diverge from what a real
+  // invocation actually runs. `linesChanged === 0` is a caller-side "skip
+  // entirely" case in runL1L2Drift, not a value this function classifies,
+  // so it's not exercised here (Layer 2's real-git case covers that path).
   const cfg = { ...DEFAULT_THRESHOLDS };
-  const classify = (linesChanged, currentLineCount) => {
-    const pct = (100 * linesChanged) / Math.max(currentLineCount, 1);
-    if (linesChanged === 0) return "none";
-    if (linesChanged < cfg.minAbsoluteLinesChanged) return "trivial";
-    if (pct >= cfg.l2MajorPct) return "major";
-    if (pct >= cfg.l2MinorPct) return "minor";
-    return "trivial";
-  };
+  const classify = (linesChanged, currentLineCount) => classifyL1L2Change(linesChanged, currentLineCount, cfg).verdict;
   assert(classify(2, 500) === "trivial", "a 2-line change on a 500-line file must classify as trivial (below minAbsoluteLinesChanged floor)");
   assert(classify(80, 500) === "minor", `an 80/500=16% change must classify as minor, got ${classify(80, 500)}`);
   assert(classify(250, 500) === "major", `a 250/500=50% change must classify as major, got ${classify(250, 500)}`);
@@ -594,6 +649,30 @@ function runSelfTestLayer1() {
   assert(!reparsed.error, `round-tripped frontmatter failed to re-parse: ${reparsed.error}`);
   assert(JSON.stringify(reparsed.data.covers) === JSON.stringify(parsed.data.covers), "round-trip lost/changed `covers`");
   assert(reparsed.data.status === parsed.data.status, "round-trip lost/changed `status`");
+
+  // `@`-in-path regex alignment (impl-audit real-bug finding) — stripCiteSuffix
+  // must strip a scoped-package-shaped path to its bare path, matching
+  // check-doc-cites.mjs's PATH_RE_SRC grammar (which includes `@`).
+  const atPathEntry = "node_modules/@scope/pkg/index.ts § someExport";
+  const stripped = stripCiteSuffix(atPathEntry);
+  assert(
+    stripped === "node_modules/@scope/pkg/index.ts",
+    `stripCiteSuffix did not correctly strip an @-scoped-package citation's § suffix: got ${JSON.stringify(stripped)}`,
+  );
+
+  // `--out` CLI-parsing nit (impl-audit §6b) — a trailing bare `--out` with
+  // no following value must fall back to stdout (null), never leave the
+  // internal sentinel as a literal filename.
+  const parsedNoValue = parseArgs(["--format=md", "--out"]);
+  assert(
+    parsedNoValue.out === null,
+    `a trailing bare "--out" with no value should fall back to null (stdout), got ${JSON.stringify(parsedNoValue.out)}`,
+  );
+  const parsedWithValue = parseArgs(["--out", "/tmp/report.json"]);
+  assert(
+    parsedWithValue.out === "/tmp/report.json",
+    `"--out <path>" (space form) should still parse the following arg as the path, got ${JSON.stringify(parsedWithValue.out)}`,
+  );
 
   console.log("doc-drift-status --self-test: Layer 1 (pure-function) — all assertions passed.");
 }
@@ -688,9 +767,137 @@ function runSelfTestLayer2() {
   }
 }
 
+function buildNumberedLines(prefix, count) {
+  return Array.from({ length: count }, (_, i) => `${prefix}${String(i + 1).padStart(3, "0")}`);
+}
+
+/** Impl-audit finding B2 / correctness §3a — THE MOST SEVERE finding in
+ *  this cycle's impl-audit: the previous self-test's "minor/major
+ *  classification" coverage was a hand-duplicated closure (Layer 1) plus a
+ *  Layer 2 fixture that never created an L1 sibling doc at all — meaning
+ *  `runL1L2Drift`, the function that implements criteria Deliverable 2 item
+ *  2 (the tool's core purpose), was NEVER actually invoked with real
+ *  inputs by `--self-test`. This builds a REAL L1 (README.md) + L2
+ *  (thing.md) pair in a real scratch git repo, commits a real edit that
+ *  crosses the MINOR threshold, asserts `buildReport`'s real output, then
+ *  a further real edit that crosses the MAJOR threshold, asserts again —
+ *  driving the actual production `runL1L2Drift`/`classifyL1L2Change`
+ *  functions end to end, not a reimplementation. */
+function runSelfTestLayer2MinorMajor() {
+  const scratchRoot = initScratchRepo();
+  try {
+    const docsDir = join(scratchRoot, "docs", "area2");
+    mkdirSync(docsDir, { recursive: true });
+    const readmePath = join(docsDir, "README.md");
+    const l2Path = join(docsDir, "thing.md");
+
+    // Deliberately NO frontmatter on either file here — runL1L2Drift
+    // operates purely on git history + raw line counts (l1SiblingFor,
+    // lastTouched, linesChangedSince), independent of the frontmatter
+    // contract, so this isolates the L1<->L2 axis cleanly from the L3 axis
+    // already covered by runSelfTestLayer2/runSelfTestLayer2Historical.
+    writeFileSync(readmePath, "# Area2\n\nThe L1 for this scratch area.\n", "utf8");
+    const initialLines = buildNumberedLines("line", 100);
+    writeFileSync(l2Path, initialLines.join("\n") + "\n", "utf8");
+
+    const baseTs = 1_710_000_000;
+    commitAt(scratchRoot, baseTs, "initial: README.md (L1) + thing.md (L2, 100 lines)");
+
+    const config = { ...DEFAULT_CONFIG, ...DEFAULT_THRESHOLDS, scopedDocDirs: ["docs/area2"] };
+
+    // MINOR: replace lines 1-10 with distinct content -> a clean 10
+    // insertions + 10 deletions = 20 lines changed; line count stays 100
+    // (replace-in-place) -> pctChanged = 20% (>=15% minor floor, <40% major
+    // floor -> "minor").
+    const minorLines = [...initialLines];
+    for (let i = 0; i < 10; i++) minorLines[i] = `changedA${String(i + 1).padStart(3, "0")}`;
+    writeFileSync(l2Path, minorLines.join("\n") + "\n", "utf8");
+    commitAt(scratchRoot, baseTs + 1000, "edit thing.md: 10 lines changed (expect minor)");
+
+    let report = buildReport(scratchRoot, config);
+    let entry = report.l1l2Drift.find((d) => d.l2 === "docs/area2/thing.md");
+    assert(entry, `docs/area2/thing.md missing from l1l2Drift after the minor-sized edit: ${JSON.stringify(report.l1l2Drift)}`);
+    assert(
+      entry.verdict === "minor",
+      `expected verdict "minor" from the REAL runL1L2Drift/buildReport output after a 10-line replacement ` +
+        `(20 lines changed / 100 = 20%), got "${entry.verdict}" (${entry.pctChanged}%, ${entry.linesChangedSinceL1} lines)`,
+    );
+
+    // MAJOR: replace a further 30 lines (11-40) on top -> +30 ins +30 del =
+    // +60 more; cumulative linesChangedSince(L1) = 20+60 = 80, still 100
+    // lines total -> pctChanged = 80% (>=40% -> "major").
+    const majorLines = [...minorLines];
+    for (let i = 10; i < 40; i++) majorLines[i] = `changedB${String(i + 1).padStart(3, "0")}`;
+    writeFileSync(l2Path, majorLines.join("\n") + "\n", "utf8");
+    commitAt(scratchRoot, baseTs + 2000, "edit thing.md: 30 more lines changed (expect major)");
+
+    report = buildReport(scratchRoot, config);
+    entry = report.l1l2Drift.find((d) => d.l2 === "docs/area2/thing.md");
+    assert(entry, `docs/area2/thing.md missing from l1l2Drift after the major-sized edit: ${JSON.stringify(report.l1l2Drift)}`);
+    assert(
+      entry.verdict === "major",
+      `expected verdict "major" from the REAL runL1L2Drift/buildReport output after cumulative changes reach ` +
+        `~80% of the file, got "${entry.verdict}" (${entry.pctChanged}%, ${entry.linesChangedSinceL1} lines)`,
+    );
+
+    console.log("doc-drift-status --self-test: Layer 2b (REAL runL1L2Drift minor+major via a real L1+L2 pair) — passed.");
+  } finally {
+    rmSync(scratchRoot, { recursive: true, force: true });
+  }
+}
+
+/** Impl-audit finding — `status: historical` suppression had ZERO
+ *  self-test coverage (grepping the old self-test body for "historical"
+ *  found zero references). Builds a real doc with `status: historical`
+ *  whose covered code IS edited after the doc's own last commit (which
+ *  would trigger needs-maintenance for any non-historical doc) and asserts
+ *  it is correctly routed to `l3DriftHistorical`, never `l3Drift`/
+ *  needs-maintenance. */
+function runSelfTestLayer2Historical() {
+  const scratchRoot = initScratchRepo();
+  try {
+    const docsDir = join(scratchRoot, "docs", "area3");
+    mkdirSync(docsDir, { recursive: true });
+    const codePath = join(scratchRoot, "legacy-code.ts");
+    const docPath = join(docsDir, "legacy.md");
+
+    writeFileSync(codePath, "export function legacyFn() {}\n", "utf8");
+    writeFileSync(
+      docPath,
+      '---\ncovers:\n  - "legacy-code.ts"\nrelated: []\nstatus: historical\n---\n\n# Legacy\n',
+      "utf8",
+    );
+    const baseTs = 1_720_000_000;
+    commitAt(scratchRoot, baseTs, "initial: legacy.md (status: historical) + legacy-code.ts");
+
+    // Edit the covered code AFTER the doc's own commit — would normally
+    // trigger needs-maintenance for a non-historical doc.
+    writeFileSync(codePath, "export function legacyFn() {}\nexport function legacyFn2() {}\n", "utf8");
+    commitAt(scratchRoot, baseTs + 1000, "edit legacy-code.ts (real change, postdating the historical doc)");
+
+    const config = { ...DEFAULT_CONFIG, ...DEFAULT_THRESHOLDS, scopedDocDirs: ["docs/area3"] };
+    const report = buildReport(scratchRoot, config);
+
+    const inHistorical = report.l3DriftHistorical.find((d) => d.doc === "docs/area3/legacy.md");
+    assert(inHistorical, `docs/area3/legacy.md missing from l3DriftHistorical: ${JSON.stringify(report.l3DriftHistorical)}`);
+    const inNonHistorical = report.l3Drift.find((d) => d.doc === "docs/area3/legacy.md");
+    assert(
+      !inNonHistorical,
+      `docs/area3/legacy.md (status: historical) incorrectly appeared in the non-historical l3Drift bucket ` +
+        `despite its covered code being edited after the doc — historical suppression is broken: ${JSON.stringify(inNonHistorical)}`,
+    );
+
+    console.log("doc-drift-status --self-test: Layer 2c (historical-status suppression, real code edit postdating the doc) — passed.");
+  } finally {
+    rmSync(scratchRoot, { recursive: true, force: true });
+  }
+}
+
 function runSelfTest() {
   runSelfTestLayer1();
   runSelfTestLayer2();
+  runSelfTestLayer2MinorMajor();
+  runSelfTestLayer2Historical();
   console.log("doc-drift-status --self-test: ALL LAYERS PASSED.");
 }
 
@@ -698,6 +905,14 @@ function runSelfTest() {
 // Entry point
 // ---------------------------------------------------------------------------
 
+const OUT_AWAITING_VALUE = Symbol("out-awaiting-value");
+
+// (nit fix, impl-audit §6b) — a bare `--out` with no following value used to
+// leave `out.out` set to the literal sentinel STRING "__NEXT__", which was
+// then used verbatim as an output filename (silently writing a report to a
+// file named `__NEXT__` instead of erroring or falling back to stdout). A
+// Symbol sentinel can never collide with a real filename, and this is
+// explicitly checked/cleared after the parse loop below.
 function parseArgs(argv) {
   const out = { out: null, format: "json", write: false, selfTest: false };
   for (const arg of argv) {
@@ -705,8 +920,12 @@ function parseArgs(argv) {
     else if (arg === "--write") out.write = true;
     else if (arg === "--format=md") out.format = "md";
     else if (arg.startsWith("--out=")) out.out = arg.slice("--out=".length);
-    else if (arg === "--out") out.out = "__NEXT__";
-    else if (out.out === "__NEXT__") out.out = arg;
+    else if (arg === "--out") out.out = OUT_AWAITING_VALUE;
+    else if (out.out === OUT_AWAITING_VALUE) out.out = arg;
+  }
+  if (out.out === OUT_AWAITING_VALUE) {
+    console.error('doc-drift-status: "--out" given with no following path — falling back to stdout.');
+    out.out = null;
   }
   return out;
 }
@@ -718,6 +937,8 @@ if (args.selfTest) {
   process.exit(0);
 }
 
+const config = loadConfig();
+assertScriptInstallDirIsSingleSegment(config);
 const REPO_ROOT = resolve(__dirname, "..");
 
 if (!isGitRepo(REPO_ROOT)) {
@@ -730,10 +951,22 @@ if (isShallowRepo(REPO_ROOT)) {
   );
 }
 
-const config = loadConfig();
 const report = buildReport(REPO_ROOT, config);
 
 if (args.write) {
+  // Defense-in-depth code-level guard (non-blocking finding, addressed
+  // anyway — cheap): `--write` is documented "LOCAL ONLY, never in CI," but
+  // that was previously enforced by documentation alone. Refuse outright if
+  // a CI environment is detected (the near-universal `CI=true` convention
+  // GitHub Actions/GitLab CI/CircleCI/etc. all set), rather than relying
+  // solely on a human reading the comment correctly in a workflow file.
+  if (process.env.CI) {
+    console.error(
+      'doc-drift-status: refusing to run with --write inside a CI environment (process.env.CI is set) — ' +
+        "--write is local-only by design. Remove --write from the CI invocation.",
+    );
+    process.exit(1);
+  }
   console.error(
     "doc-drift-status: --write passed — writing status_note updates to frontmatter (LOCAL-ONLY; never pass --write in CI).",
   );
