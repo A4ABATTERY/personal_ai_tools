@@ -1939,7 +1939,11 @@ public enum TaskState {
   assert(symbolExistsInSource(csPlainEnumSource, "Large", ".cs", emptyConfig) === true, "plain C# enum's LAST member 'Large' (no trailing comma before the closing brace) not found");
 
   // Swift `case`-vs-switch-collision case — an identically-named switch
-  // `case` label elsewhere in the file must not gate/confuse the result.
+  // `case` label elsewhere in the file must not gate/confuse the result,
+  // AND (the actual regression this guards against, per §1.3.3/§5.2(b)) a
+  // switch-statement `case` label for a symbol that is NEVER a real enum
+  // member must not be mistaken for one just because it textually matches
+  // `case <name>` somewhere outside any enum body.
   const swiftSource = `
 enum Direction {
     case north, south
@@ -1953,10 +1957,23 @@ func describe(d: Direction) -> String {
         return "?"
     }
 }
+
+func classify(code: Int) -> String {
+    switch code {
+    case notARealDirectionMember:
+        return "special"
+    default:
+        return "normal"
+    }
+}
 `;
   assert(
     symbolExistsInSource(swiftSource, "north", ".swift", emptyConfig) === true,
-    "Swift enum case 'north' not found (or incorrectly affected by the unrelated switch-statement case label elsewhere in the file)",
+    "Swift enum case 'north' not found (real declaration inside the enum body)",
+  );
+  assert(
+    symbolExistsInSource(swiftSource, "notARealDirectionMember", ".swift", emptyConfig) === false,
+    "a switch-statement `case` label for a symbol that is NEVER a real enum member was incorrectly resolved true (body-span scoping regression — the collision this test exists to catch)",
   );
 
   console.log("check-doc-cites --self-test: Layer 1 (D1 enum-member) — all assertions passed.");
