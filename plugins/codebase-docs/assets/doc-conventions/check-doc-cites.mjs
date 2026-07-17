@@ -1777,6 +1777,24 @@ public class WidgetService : IWidgetService {
     );
   }
 
+  // Mutation-mandate target (§5.1(b)): RETURN_TYPE's positive allowlist
+  // (uppercase-starting token, or an exact primitive keyword) is what makes
+  // a bare, lowercase-starting token immediately preceding a symbol across
+  // a line-wrap correctly REJECTED. None of the call-site shapes above
+  // cross a line-wrap the way a widened ("any identifier") allowlist could
+  // exploit — this adversarial (deliberately not "realistic" C#) fixture
+  // isolates exactly that boundary: a bare lowercase identifier on its own
+  // line, immediately followed (whitespace/newline only, no receiver dot)
+  // by a symbol-shaped token and `(`. Widening RETURN_TYPE to accept any
+  // identifier (not just uppercase-starting/primitive) makes this resolve
+  // true; the allowlist's uppercase/primitive restriction is what keeps it
+  // false.
+  const lowercaseAdjacentSource = "count\nNeverDeclaredWrappedTarget();\n";
+  assert(
+    symbolExistsInSource(lowercaseAdjacentSource, "NeverDeclaredWrappedTarget", ".cs", emptyConfig) === false,
+    "a lowercase-starting token immediately preceding a symbol across a line-wrap was incorrectly resolved as a declaration (RETURN_TYPE allowlist regression)",
+  );
+
   // Round-3 Blocker 4(b) — the method-decl fallback's OWN block-comment
   // immunity, dedicated and distinct from the enum-path F1 test below (the
   // shared stripper closes this for method-decl too, but round 2 never had
