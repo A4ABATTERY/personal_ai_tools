@@ -83,7 +83,11 @@ The point is to **conserve your own context** so the work can run for many itera
 
 1. **Pick the next area** — one L1 area, or a batch of L2s within it. (When building from scratch, work
    down the module list; when maintaining, pick what the code change touched — see STRUCTURE.md's
-   "you touched … → update …" table.)
+   "you touched … → update …" table.) If the target repo has an installed drift-status tool (check for
+   `doc-drift-status.mjs` alongside the doc-cite lint), run it first and use its report to prioritize which
+   docs are stale — treat it as a LEAD, not a fact; verify every flagged item against L3 same as any
+   auditor fix-list (the same "auditors miscount and fabricate too" discipline already in the
+   Hard-won-lessons section applies to this report's `major`/`minor` verdicts too).
 2. **Explore** — dispatch parallel explorers (per rule 4) → `temp/docwork/<area>/*.md`.
 3. **Verify + write** — dispatch writer agent(s) that read the explorers' temp paths, verify against
    code, write the L1 README and/or L2 docs into the correct tier location, and fold in any relevant
