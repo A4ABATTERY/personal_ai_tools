@@ -38,6 +38,7 @@ This skill defines the **loop**; the **project** defines its specifics via a nam
 | `auditor_concurrency` / `budget_caps` | parallel panel of 2–3; no caps |
 | `hazard_ledger[]` | empty — commands that mutate shared/external state, are location-restricted, or have flag traps: `{cmd, hazard, containment, recovery?}` |
 | `docs_contract` | update docs with the change in the same integration unit, when a docs convention exists |
+| `attribution` | ASK the user at the first cycle how code attribution should work (trailers, co-author lines, none) and record the answer here. Regardless of the answer: NEVER put session/conversation links in commits, PR bodies, or issue text — they leak a private conversation handle into a durable record |
 | `durable_record` | a WORKLOG file in the runtime's per-project memory dir (the DEFAULT IMPLEMENTATION below, not the definition — a project may use work items or several distinct write surfaces instead) |
 | `artifact_root` | job/session temp dir, never the repo tree |
 | `model_policy` | the default table below |
