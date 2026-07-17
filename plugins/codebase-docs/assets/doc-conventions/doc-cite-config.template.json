@@ -1,0 +1,11 @@
+{
+  "scopedDocDirs": [],
+  "docsRoot": "docs",
+  "knownCiteExtensions": ["ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "yml", "yaml", "html", "css", "md", "py", "go", "rs", "java", "cs", "rb"],
+  "generatedPathPrefixes": [],
+  "headingSlugAlgorithm": "none",
+  "extraDeclarationPatterns": [],
+  "_scriptInstallDir": "scripts",
+  "_pluginAssetVersion": "0.0.0",
+  "_comment": "This file is read by BOTH check-doc-cites.mjs (the citation lint) and doc-drift-status.mjs (the drift-detection tool) as their shared per-repo config. scopedDocDirs/extraDeclarationPatterns ship EMPTY here (this is the raw template) — docs-init-or-improve/docs-migrate fill them in at install time from the target repo's own docs/STRUCTURE.md 'substantive areas' table. l2MinorPct/l2MajorPct/minAbsoluteLinesChanged (drift-tool thresholds) are optional; omit to use the tool's built-in defaults (15/40/5)."
+}
