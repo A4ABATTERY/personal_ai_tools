@@ -423,7 +423,16 @@ function listScopedMarkdownFiles(repoRoot, config) {
 // path — the entire raw string (path + ` § ` + symbol) was treated as "the
 // path," producing a garbled integrityIssues message with a space and a
 // `§` character embedded in what's reported as a file path.
-const STRIP_CITE_SUFFIX_RE = /^([\w./@-]+\.\w+)\s§\s.+$/;
+//
+// 0.5.1 (D2, §2.3): space admitted into the leading path class, mirroring
+// check-doc-cites.mjs's COVERS_CITATION_RE/COVERS_BARE_PATH_RE widening —
+// a real MSSQL/Windows-tooling-shaped path (e.g. a `Stored Routines`
+// folder segment) previously stripped to a truncated fragment. Bounded
+// (`{1,240}`/`{1,20}`) as defensive-consistency hygiene, not a ReDoS
+// closure: this regex is `^...$`-anchored and run once via `.exec()`
+// against a single already-isolated `covers` entry string, never
+// `matchAll` over free prose.
+const STRIP_CITE_SUFFIX_RE = /^([\w./@ -]{1,240}\.\w{1,20})\s§\s.+$/;
 function stripCiteSuffix(coversEntry) {
   const m = STRIP_CITE_SUFFIX_RE.exec(coversEntry.trim());
   return m ? m[1] : coversEntry.trim();
@@ -694,6 +703,16 @@ function runSelfTestLayer1() {
   assert(
     stripped === "node_modules/@scope/pkg/index.ts",
     `stripCiteSuffix did not correctly strip an @-scoped-package citation's § suffix: got ${JSON.stringify(stripped)}`,
+  );
+
+  // 0.5.1 (D2, round-3 §4.2 item 3) — a space-containing, MSSQL/Windows-
+  // tooling-shaped path must strip to its FULL, untruncated bare path, not
+  // a fragment cut off at the first space.
+  const spacePathEntry = "Some_Reports_DB/Stored Routines/GetSummary.sql § GetSummaryData";
+  const spaceStripped = stripCiteSuffix(spacePathEntry);
+  assert(
+    spaceStripped === "Some_Reports_DB/Stored Routines/GetSummary.sql",
+    `stripCiteSuffix did not correctly strip a space-containing citation's § suffix: got ${JSON.stringify(spaceStripped)}`,
   );
 
   // `--out` CLI-parsing nit (impl-audit §6b) — a trailing bare `--out` with
