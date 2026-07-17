@@ -1,6 +1,6 @@
 {
   "name": "codebase-docs",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Codebase wayfinding + tiered-docs maintenance skills for any repo.",
   "author": {
     "name": "Arunav Biswas"
