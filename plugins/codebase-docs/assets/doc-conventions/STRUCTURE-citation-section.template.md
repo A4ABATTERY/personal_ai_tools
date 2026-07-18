@@ -9,8 +9,13 @@ The **only** form for citing a specific piece of code. Replaces an old `file.ext
 convention (line numbers drift the moment the cited file is edited; a symbol name does not).
 
 - **Path** — full repo-root-relative path (never a bare filename: several files can share a basename
-  shape, and a full path removes any ambiguity for a plain grep).
+  shape, and a full path removes any ambiguity for a plain grep). A path containing a space (e.g. a
+  Windows-tooling-shaped folder like `Stored Routines/`) is only resolvable via the frontmatter `covers`
+  list below — the inline body-text form does not support space-containing paths (ambiguous against
+  surrounding prose, and measurably slower to scan safely); put any space-containing path in `covers` only.
 - **Separator** — a literal ` § ` (U+00A7, one space either side).
+- A `§` reference whose path targets a `.md` file is never a code citation, regardless of whether its
+  "symbol" is quoted or bare — see convention 2 below.
 - **Symbol** — the name exactly as declared in code: a function/const/class/interface/type/hook/component
   name (`src/payments/process.py § process_payment`), a dot-form method/handler inside a component or
   scope (`src/widgets/Panel.tsx § PanelProvider.confirmClose`), a JSON/YAML key-path for a config file
@@ -48,6 +53,13 @@ phrase is what excludes it from the code-citation convention above by constructi
 citation-detection regex never matches a symbol that starts with `"`/`'`. Never converted, never
 symbol-existence-checked, entirely out of `check-doc-cites.mjs`'s scope. Do not blur the two — a citation
 whose "symbol" is a quoted phrase is always this convention, never a code citation.
+
+A **bare** (unquoted, unwrapped) `doc.md § SectionName` reference — e.g. `docs/plans/x.md § Sampling`,
+without surrounding backticks/link/quotes — is excluded from symbol-existence checking by the SAME
+structural rule as the quoted form above: any `§` reference whose cited path is itself a `.md` file is a
+doc-section cross-reference, never a code citation, regardless of whether the symbol part happens to be
+quoted. `.md` has no declaration table (no language recognizes it), so this can never accidentally swallow
+a real code citation.
 
 ### Per-doc frontmatter
 

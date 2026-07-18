@@ -118,6 +118,19 @@ function loadConfig() {
 // bounds the worst-case backtracking cost per start position to a constant,
 // turning the scan back into O(n) total. 240/20 comfortably covers any real
 // repo-relative path/extension while eliminating the unbounded blowup.
+//
+// 0.5.1 GUARDRAIL (D2, §2.1): this class deliberately does NOT admit space,
+// unlike the `covers`-frontmatter regexes below (COVERS_CITATION_RE /
+// COVERS_BARE_PATH_RE), which were widened to admit space in 0.5.1. This
+// regex is scanned via `matchAll` over free body PROSE (unanchored,
+// re-attempted at every offset) — admitting space here risks a greedy path
+// class globbing unrelated dot-extension words across a sentence into one
+// bogus "path," and was independently measured at ~50x slower (~400-500ms
+// vs ~8ms on a 280,000-char adversarial body, linear-scaling to ~2.8s at
+// 2,000,000 chars) for a hypothetical space-admitting variant of this exact
+// unanchored-scan mechanism. A future change admitting space here MUST be
+// re-verified against this exact adversarial-timing shape first — do not
+// assume the `covers`-side widening below transfers safely to this regex.
 const PATH_RE_SRC = String.raw`[\w./@-]{1,240}\.\w{1,20}`;
 const IDENT_RE_SRC = String.raw`[A-Za-z_$][\w$-]*`;
 const SYMBOL_SEGMENT_RE_SRC = String.raw`${IDENT_RE_SRC}|\["[^"]*"\]|\['[^']*'\]|\[\d+\]`;
@@ -477,8 +490,13 @@ const LANGUAGE_DECL_KEYWORDS = {
   ".rs": ["fn", "struct", "enum", "trait", "const", "static"],
   ".java": ["class", "interface", "enum", "record"],
   ".cs": ["class", "interface", "enum", "record"],
-  ".kt": ["class", "interface", "enum", "record"],
-  ".swift": ["class", "interface", "enum", "record"],
+  // 0.5.1 (D1 Fix 1A): "fun"/"func" are the real, fixed leading method
+  // keywords for Kotlin/Swift (structurally identical to how `function`
+  // already works for the JS/TS family) — "record" never existed as a
+  // keyword in either language and is removed as a deliberate, small,
+  // separately-flagged scope addition (see the plugin's 0.5.1 changelog).
+  ".kt": ["class", "interface", "enum", "fun"],
+  ".swift": ["class", "interface", "enum", "func"],
   ".rb": ["def", "class", "module"],
 };
 
@@ -529,6 +547,290 @@ function symbolDeclaredAsHead(symbol, extNoDotDot, ext, config) {
   return declRe !== null && declRe.test(extNoDotDot);
 }
 
+// ---------------------------------------------------------------------------
+// 0.5.1 (D1 Fix 1B) — C#/Java method declarations + C#/Java/Kotlin/Swift
+// enum-member declarations. `LANGUAGE_DECL_KEYWORDS` above only covers
+// TYPE-level declarations (class/interface/enum); C# and Java method
+// declarations have a variable return-type token instead of a fixed leading
+// keyword, and enum members have no keyword at all — both need a dedicated
+// fallback, checked only after the type-level table above has already
+// failed to resolve the symbol (§1 of the 0.5.1 hardening plan).
+// ---------------------------------------------------------------------------
+
+const CSHARP_JAVA_METHOD_EXTS = new Set([".cs", ".java"]);
+const ENUM_MEMBER_EXTS = new Set([".cs", ".java", ".kt", ".swift"]);
+
+/** Shared preprocessing for both the method-decl and enum-member fallbacks
+ *  (§1.3.0). A plain character-by-character state-machine scanner — linear
+ *  O(n) by construction, NOT a regex, so it cannot itself exhibit
+ *  backtracking-driven blowup. Blanks every `//…`/`/*…*\/`/`"…"`/`'…'`
+ *  region with spaces (newlines preserved) so a comment- or string-embedded
+ *  decl-shaped fragment (`// enum Fake { NotReal }`) can never be mistaken
+ *  for a real declaration.
+ *
+ *  DOCUMENTED BOUNDARY (best-effort only, not a full lexer):
+ *  - C#'s verbatim strings (`@"..."`, `""`-escaped) and interpolated strings
+ *    (`$"..."`) are not specially handled — ordinary, well-formed code
+ *    usually self-corrects the scanner's state by the time it reaches the
+ *    true end of the token stream, but a verbatim string containing an
+ *    embedded `""` (or other malformed/edge-case quoting) can leave the
+ *    scanner's STRING state mistracked, either exposing string-fragment text
+ *    as fake code or swallowing real code into a phantom string region.
+ *  - An UNTERMINATED string/char literal or block comment anywhere in the
+ *    file puts the scanner into that state for the remainder of the file —
+ *    every subsequent line is blanked, including genuinely real,
+ *    otherwise-detectable declarations. This is fail-closed (a citation
+ *    against genuinely malformed/mid-edit source declines to resolve rather
+ *    than false-matching), not a false positive — accepted for this patch,
+ *    not fixed. */
+function stripCFamilyCommentsAndStrings(sourceText) {
+  const NORMAL = 0, LINE_COMMENT = 1, BLOCK_COMMENT = 2, STRING = 3, CHAR = 4;
+  let state = NORMAL;
+  const out = new Array(sourceText.length);
+  for (let i = 0; i < sourceText.length; i++) {
+    const c = sourceText[i];
+    if (state === NORMAL) {
+      const next = sourceText[i + 1];
+      if (c === "/" && next === "/") { state = LINE_COMMENT; out[i] = " "; continue; }
+      if (c === "/" && next === "*") { state = BLOCK_COMMENT; out[i] = " "; continue; }
+      if (c === '"') { state = STRING; out[i] = " "; continue; }
+      if (c === "'") { state = CHAR; out[i] = " "; continue; }
+      out[i] = c;
+    } else if (state === LINE_COMMENT) {
+      if (c === "\n") { state = NORMAL; out[i] = "\n"; } else out[i] = " ";
+    } else if (state === BLOCK_COMMENT) {
+      if (c === "*" && sourceText[i + 1] === "/") {
+        out[i] = " ";
+        out[i + 1] = " ";
+        state = NORMAL;
+        i++;
+      } else {
+        out[i] = c === "\n" ? "\n" : " ";
+      }
+    } else if (state === STRING || state === CHAR) {
+      const closer = state === STRING ? '"' : "'";
+      if (c === "\\") {
+        out[i] = " ";
+        if (i + 1 < sourceText.length) {
+          out[i + 1] = sourceText[i + 1] === "\n" ? "\n" : " ";
+          i++;
+        }
+        continue;
+      }
+      if (c === closer) { state = NORMAL; out[i] = " "; continue; }
+      out[i] = c === "\n" ? "\n" : " ";
+    }
+  }
+  return out.join("");
+}
+
+// --- D1 Fix 1B(a): C#/Java method-declaration detection ---------------------
+//
+// Regex body (§1.2's Design block): an optional bounded [Attribute] line,
+// zero-or-more modifiers, a positive-allowlist return type, the symbol name,
+// an optional bounded <T> generic-args suffix, then the opening paren. Tested
+// per-window WITHOUT the `m` flag (§1.2.1) — never as a single whole-file
+// `m`-flag `.test()` call, which is the O(n^2) shape that made round 2's
+// design unsafe (the `\s+` separators match `\n`, so a single match attempt
+// starting at one line can grow to span the whole remaining file across
+// consecutive modifier-shaped lines, e.g. an EF/ORM-scaffolded C# entity
+// class's auto-properties).
+const CSHARP_JAVA_MODIFIER_ALT_SRC =
+  "public|private|protected|internal|static|virtual|override|abstract|sealed|async|readonly|new|extern|unsafe|partial|final|synchronized|native|default|strictfp";
+const CSHARP_JAVA_PRIMITIVE_ALT_SRC =
+  "void|int|long|short|byte|char|bool|string|object|dynamic|decimal|double|float|uint|ulong|sbyte|ushort|boolean";
+
+const CSHARP_JAVA_METHOD_RE_CACHE = new Map();
+function csharpJavaMethodDeclRegexFor(symbol, ext) {
+  const cacheKey = `${ext}::${symbol}`;
+  if (CSHARP_JAVA_METHOD_RE_CACHE.has(cacheKey)) return CSHARP_JAVA_METHOD_RE_CACHE.get(cacheKey);
+  const escaped = escapeRegex(symbol);
+  const src = String.raw`^[ \t]*(?:\[[^\]\n]{0,200}\]\s*)*(?:(?:${CSHARP_JAVA_MODIFIER_ALT_SRC})\s+)*(?:[A-Z][\w<>\[\],.\? ]{0,119}|(?:${CSHARP_JAVA_PRIMITIVE_ALT_SRC})\??)\s+${escaped}\s*(?:<[^>\n]{0,80}>)?\s*\(`;
+  // NO "m" flag: each window (below) is already positioned at its own true
+  // start, so a bare `^` already means exactly "start of this candidate
+  // line" — no `m`-flag whole-file scan is ever performed.
+  const re = new RegExp(src);
+  CSHARP_JAVA_METHOD_RE_CACHE.set(cacheKey, re);
+  return re;
+}
+
+// K=4 window rationale: the regex only needs to see from the start of a
+// declaration line through the opening `(` — it never needs the full
+// parameter list or body. The realistic wrapping shapes are a 2-line
+// return-type-then-name split (long generic return types) or a 2-3-line
+// attribute-then-modifiers-then-signature spread; K=4 gives a full extra
+// line of headroom beyond that. DOCUMENTED BOUNDARY: the false-negative
+// trigger this window size can miss is precisely ">4-line gap between the
+// RETURN-TYPE line and the SYMBOL line" (not merely "a signature exceeding 4
+// total lines" — the window can start at any line, so anything closer
+// together than that gap is still caught). Not observed in any real or
+// adversarial C#/Java sample across three audit rounds.
+const WINDOW_LINES = 4;
+// Defensive per-window char cap (applied to the joined window's total
+// length, not a single physical line, so one pathological multi-megabyte
+// line can't inflate a window's cost) — far beyond any realistic method
+// signature, same "generous, not tight" philosophy as PATH_RE_SRC's {1,240}.
+const MAX_WINDOW_LINE_CHARS = 2000;
+
+function csharpJavaMethodDeclOccursIn(strippedText, symbol, ext) {
+  const re = csharpJavaMethodDeclRegexFor(symbol, ext);
+  const lines = strippedText.split("\n");
+  const cap = WINDOW_LINES * MAX_WINDOW_LINE_CHARS;
+  for (let i = 0; i < lines.length; i++) {
+    let window = lines[i];
+    for (let k = 1; k < WINDOW_LINES && i + k < lines.length; k++) window += "\n" + lines[i + k];
+    if (window.length > cap) window = window.slice(0, cap);
+    if (re.test(window)) return true;
+  }
+  return false;
+}
+
+// --- D1 Fix 1B(b): C#/Java/Kotlin/Swift enum-member detection ---------------
+//
+// Four independently-testable units (§1.3): a per-ext enum-opener regex
+// (bounded, cached), a depth-counting body-span locator with a defensive
+// per-span char cap (the genuine ReDoS guard on this path), a nested-brace
+// masking pass (closes the false-positive where an assignment inside a
+// rich-enum constant's own method body, or a static/instance initializer
+// block, was mistaken for a top-level enum member), and a follower-set
+// search run against the masked span only.
+const ENUM_OPENER_RE_SRC = {
+  // C# enums may declare an underlying-type inheritance clause (`: byte`).
+  ".cs": String.raw`\benum\s+[A-Za-z_$][\w$]*(?:\s*:\s*[\w,\s<>]{0,200})?\s*\{`,
+  // Java "rich enums" may implement interfaces.
+  ".java": String.raw`\benum\s+[A-Za-z_$][\w$]*(?:\s+implements\s+[\w,\s<>]{0,200})?\s*\{`,
+  // Kotlin: `enum class Foo(ctorArgs) : Interfaces {` — bounded constructor-
+  // args and interface-list classes, matching this file's own bounded-
+  // quantifier convention.
+  ".kt": String.raw`\benum\s+class\s+[A-Za-z_$][\w$]*(?:\s*\([^)\n]{0,200}\))?(?:\s*:\s*[\w,\s<>]{0,200})?\s*\{`,
+  // Swift enums may declare a raw-value type or protocol conformance list.
+  ".swift": String.raw`\benum\s+[A-Za-z_$][\w$]*(?:\s*:\s*[\w,\s<>]{0,200})?\s*\{`,
+};
+
+const ENUM_OPENER_RE_CACHE = new Map();
+function enumOpenerRegexFor(ext) {
+  if (ENUM_OPENER_RE_CACHE.has(ext)) return ENUM_OPENER_RE_CACHE.get(ext);
+  const src = ENUM_OPENER_RE_SRC[ext];
+  const re = src ? new RegExp(src, "g") : null;
+  ENUM_OPENER_RE_CACHE.set(ext, re);
+  return re;
+}
+
+// The genuine ReDoS guard on this path (§1.3.1) — a plain, per-span,
+// linear-cost circuit breaker against an unclosed/pathological enum opener
+// (many unclosed openers, each followed by a long non-terminating body,
+// would otherwise each walk to end-of-file).
+const ENUM_SPAN_CHAR_CAP = 50_000;
+
+/** Locates every enum body in `strippedText` (already comment/string-
+ *  stripped) for the given extension, depth-counting forward from each
+ *  opener's own `{` to find the TRUE matching `}` (correctly handling
+ *  nested braces from a Java rich-enum per-constant body). Each returned
+ *  span is `{start, end}` where `start` is the index immediately AFTER the
+ *  enum's own opening `{` and `end` is the index OF the matching closing
+ *  `}` itself — the enum's own outer delimiting braces are never included,
+ *  so `strippedText.slice(span.start, span.end)` is always the body's
+ *  INTERIOR only (this is what makes `maskNestedBraceRegions`'s depth-0
+ *  reading unambiguous — see its own comment below). An opener whose body
+ *  never closes within `ENUM_SPAN_CHAR_CAP` characters is skipped (no span
+ *  emitted) rather than scanned unboundedly. */
+function findAllEnumBodySpans(strippedText, ext) {
+  const openerRe = enumOpenerRegexFor(ext);
+  if (!openerRe) return [];
+  openerRe.lastIndex = 0;
+  const spans = [];
+  let m;
+  while ((m = openerRe.exec(strippedText))) {
+    const braceStart = m.index + m[0].length;
+    const limit = Math.min(strippedText.length, braceStart + ENUM_SPAN_CHAR_CAP);
+    let depth = 1;
+    let i = braceStart;
+    let closed = false;
+    for (; i < limit; i++) {
+      const c = strippedText[i];
+      if (c === "{") depth++;
+      else if (c === "}") {
+        depth--;
+        if (depth === 0) { closed = true; break; }
+      }
+    }
+    if (closed) spans.push({ start: braceStart, end: i });
+    if (openerRe.lastIndex <= braceStart) openerRe.lastIndex = braceStart + 1; // safety: guarantee forward progress
+  }
+  return spans;
+}
+
+/** Blanks (replaces with spaces, preserving `{`/`}` and newlines) every
+ *  character at brace-nesting depth greater than zero relative to the
+ *  enum's own top-level body, so a rich-enum constant's own overridden-
+ *  method body, or a static/instance initializer block, can never be
+ *  mistaken for a top-level enum member by the follower-set search below.
+ *  `spanText` is always the enum body's INTERIOR ONLY (see
+ *  `findAllEnumBodySpans`'s own span definition — the enum's own outer
+ *  braces are structurally never part of it), which is what makes
+ *  `depth === 0` at the very first character unambiguously mean "a
+ *  top-level member of the enum body": every `{`/`}` pair this function can
+ *  ever encounter is necessarily a NESTED structure, never the enum's own
+ *  delimiting braces (already excluded upstream). A plain linear char-scan,
+ *  not a regex — cannot itself become a ReDoS surface. */
+function maskNestedBraceRegions(spanText) {
+  let depth = 0;
+  const out = new Array(spanText.length);
+  for (let i = 0; i < spanText.length; i++) {
+    const c = spanText[i];
+    if (c === "{") { out[i] = c; depth++; }
+    else if (c === "}") { depth = Math.max(0, depth - 1); out[i] = c; }
+    else out[i] = depth === 0 ? c : (c === "\n" ? "\n" : " ");
+  }
+  return out.join("");
+}
+
+const ENUM_MEMBER_RE_CACHE = new Map();
+function enumMemberRegexFor(symbol, ext) {
+  const cacheKey = `${ext}::${symbol}`;
+  if (ENUM_MEMBER_RE_CACHE.has(cacheKey)) return ENUM_MEMBER_RE_CACHE.get(cacheKey);
+  const escaped = escapeRegex(symbol);
+  let re;
+  if (ext === ".swift") {
+    // Bounded repetition, scoped to the masked span — a same-named
+    // switch-statement `case` label elsewhere in the file (or inside a
+    // nested closure within the span) can never match.
+    re = new RegExp(String.raw`\bcase\s+(?:[\w]+\s*,\s*){0,20}?\b${escaped}\b`);
+  } else {
+    // C#/Java/Kotlin bare comma-list form: preceded (after skipping
+    // whitespace/attributes) by start-of-span, `{`, `,`, or `;`; followed
+    // (after skipping whitespace) by `,` `;` `}` `(` `{` `=`, OR the end of
+    // the span itself (`$`). `;`/`=` are safe against the masked-out
+    // nested-body case above (§1.3.2) — every nested candidate was already
+    // removed before this regex ever runs. The `$` alternative is REQUIRED,
+    // not cosmetic: `findAllEnumBodySpans`'s span is the enum body's
+    // INTERIOR ONLY (its own closing `}` is deliberately excluded from the
+    // sliced text — see that function's own comment), so the LAST member
+    // in a comma-separated list with no trailing comma before the closing
+    // brace (the ordinary, common `enum Foo { A, B, C }` shape — `C` here)
+    // has no punctuation character left in the span after it at all; `$`
+    // (matched without the `m` flag, so it's the true end of this
+    // already-isolated span string) is what makes that ordinary case
+    // resolve instead of false-negatively requiring a trailing separator
+    // that valid syntax never puts on the last member.
+    re = new RegExp(String.raw`(?:^|[{,;])\s*(?:\[[^\]\n]{0,200}\]\s*)*\b${escaped}\b\s*(?:,|;|\}|\(|\{|=|$)`);
+  }
+  ENUM_MEMBER_RE_CACHE.set(cacheKey, re);
+  return re;
+}
+
+function searchEnumBodyForMember(maskedSpanText, symbol, ext) {
+  return enumMemberRegexFor(symbol, ext).test(maskedSpanText);
+}
+
+function enumMemberDeclOccursIn(strippedText, symbol, ext) {
+  for (const span of findAllEnumBodySpans(strippedText, ext)) {
+    const masked = maskNestedBraceRegions(strippedText.slice(span.start, span.end));
+    if (searchEnumBodyForMember(masked, symbol, ext)) return true;
+  }
+  return false;
+}
+
 function symbolExistsInSource(sourceText, symbol, ext, config) {
   const extNoDot = ext.replace(/^\./, "");
   const segs = splitSymbolPath(symbol);
@@ -537,6 +839,16 @@ function symbolExistsInSource(sourceText, symbol, ext, config) {
     if (declRe && declRe.test(sourceText)) return true;
     for (const pat of extPatternsForExt(config, extNoDot)) {
       if (extraPatternRegexFor(pat, segs[0]).test(sourceText)) return true;
+    }
+    // 0.5.1 (D1 Fix 1B): checked only after the type-level table and any
+    // repo-supplied extraDeclarationPatterns have both failed to resolve
+    // the symbol — a fallback, never a replacement, for `.cs`/`.java`
+    // method declarations and `.cs`/`.java`/`.kt`/`.swift` enum members.
+    // Both share the same comment/string-stripped text (computed once).
+    if (CSHARP_JAVA_METHOD_EXTS.has(ext) || ENUM_MEMBER_EXTS.has(ext)) {
+      const strippedText = stripCFamilyCommentsAndStrings(sourceText);
+      if (CSHARP_JAVA_METHOD_EXTS.has(ext) && csharpJavaMethodDeclOccursIn(strippedText, segs[0], ext)) return true;
+      if (ENUM_MEMBER_EXTS.has(ext) && enumMemberDeclOccursIn(strippedText, segs[0], ext)) return true;
     }
     return false;
   }
@@ -647,8 +959,42 @@ function buildOldStyleCiteRe(config) {
 // entirely. Kept in sync with PATH_RE_SRC's character class deliberately —
 // see also `stripCiteSuffix` in doc-drift-status.mjs, which has the exact
 // same grammar and needed the same fix.
-const COVERS_CITATION_RE = /^([\w./@-]+\.\w+)\s§\s(.+)$/;
-const COVERS_BARE_PATH_RE = /^[\w./@-]+\.\w+$/;
+//
+// 0.5.1 (D2, §2.1-§2.3): space admitted into the leading path class — a
+// MSSQL/Windows-tooling-shaped path (e.g. a `Stored Routines` folder
+// segment) previously truncated silently after the last space, producing a
+// false "file does not exist." Scoped deliberately to ONLY these two
+// `covers`-frontmatter regexes (and the drift tool's mirrored
+// STRIP_CITE_SUFFIX_RE) — NOT PATH_RE_SRC/CITATION_RE (see that regex's own
+// guardrail comment above for why). This is safe here specifically because
+// both regexes are `^...$`-anchored and run via a single `.exec()`/`.test()`
+// against one already-isolated `covers:` entry string — never `matchAll`
+// over free prose — so they were never exposed to the O(n^2)
+// unanchored-rescan mechanism that made admitting space into PATH_RE_SRC
+// unsafe. The `{1,240}`/`{1,20}` bounds are kept as defensive-consistency
+// hygiene only, not a ReDoS closure (this shape was never vulnerable — see
+// the file-header note above §0's original ReDoS fix). No `\s§\s` ambiguity:
+// the path capture always ends in `\.\w{1,20}` (word characters only, never
+// whitespace), so the character immediately following is guaranteed to be
+// the mandatory separator space, never an internal path space.
+const COVERS_CITATION_RE = /^([\w./@ -]{1,240}\.\w{1,20})\s§\s(.+)$/;
+const COVERS_BARE_PATH_RE = /^[\w./@ -]{1,240}\.\w{1,20}$/;
+
+// 0.5.1 (D3, §3): a BARE (unquoted, unwrapped) `doc.md § SectionName`
+// reference is a doc-section cross-reference, not a code citation, even
+// though its "symbol" doesn't start with a quote character (the thing that
+// normally excludes the quoted form — see the file-header comment on the
+// two citation conventions). `.md` has no declaration table in
+// LANGUAGE_DECL_KEYWORDS (nor any of D1's new method/enum-member paths), so
+// a `.md § symbol` cite has never had valid symbol-existence semantics under
+// this tool — treating it as a doc-section cross-reference instead of a
+// `[symbol-appears-in-file]` violation cannot swallow a real code cite by
+// construction. `.mdx` is deliberately excluded — matches this tool's
+// existing `.md`-only convention everywhere else (see e.g.
+// `listScopedMarkdownFiles`).
+function isDocSectionCarveoutPath(path) {
+  return path.endsWith(".md");
+}
 
 function checkOneCitation(repoRoot, config, relPath, context, citationText, violations, seenOut) {
   const parsed = COVERS_CITATION_RE.exec(citationText.trim());
@@ -685,6 +1031,8 @@ function checkOneCitation(repoRoot, config, relPath, context, citationText, viol
     return;
   }
 
+  if (isDocSectionCarveoutPath(path)) return; // D3 — bare `.md § Section` is a doc-section cross-reference, not a code cite
+
   if (absTarget.endsWith(".json") || absTarget.endsWith(".yml") || absTarget.endsWith(".yaml")) {
     const result = checkKeyPathAnchor(absTarget, symbol);
     if (result === false) {
@@ -716,6 +1064,36 @@ function main(repoRoot, config) {
     const text = readFileSync(absPath, "utf8");
 
     const fm = parseFrontmatter(text);
+    // 0.5.1 fix (surfaced by D2's own self-test, not a design change to
+    // D1/D2/D3 themselves — see the 0.5.1 change log's "deviations"
+    // section): the body-citation scan below previously ran over the
+    // WHOLE file text, including the raw frontmatter YAML block. Every
+    // `covers:` entry is already checked via the dedicated frontmatter
+    // path above, so re-scanning the identical raw text with the
+    // unanchored, deliberately-space-less CITATION_RE was always
+    // redundant — and, once COVERS_CITATION_RE/COVERS_BARE_PATH_RE admit
+    // space (D2), actively WRONG: a real, valid, space-containing
+    // `covers:` entry's own raw YAML text (e.g.
+    // `"Legacy Utils/helpers.ts § doThing"`) would be independently
+    // re-matched by the never-widened CITATION_RE, truncated at the first
+    // space (`"Utils/helpers.ts § doThing"`), and reported as a spurious
+    // second, bogus [cited-file-exists] violation on a citation the
+    // frontmatter-covers path had already correctly resolved. Excluding
+    // the frontmatter block from the body-scan closes this without
+    // touching PATH_RE_SRC/CITATION_RE at all.
+    //
+    // DOCUMENTED BOUNDARY (intentional, not an oversight — impl-audit
+    // finding, 0.5.1): a `§` citation written inside a FREE-TEXT
+    // frontmatter field (e.g. `status_note: "see thing.ts § symbol"`) is
+    // consequently NOT symbol-checked — only body citations and the
+    // structured `covers`/`related` list fields are. Frontmatter is a
+    // restricted, flat key/scalar-or-list grammar (see `parseFrontmatter`'s
+    // own header comment); a citation belongs in `covers`, which already
+    // gets its own dedicated, correct check above — free-text scalar
+    // fields like `status_note` were never a documented home for a `§`
+    // citation, so this is a narrow, deliberate scope boundary, not a
+    // silently-dropped check.
+    let bodyOnlyText = text;
     if (fm.error) {
       violations.push(`[frontmatter] ${relPath}: ${fm.error}`);
     } else {
@@ -728,11 +1106,12 @@ function main(repoRoot, config) {
           checkOneCitation(repoRoot, config, relPath, `frontmatter covers: ${entry}`, entry, violations, allCitationsSeen);
         }
       }
+      bodyOnlyText = text.split(/\r?\n/).slice(fm.bodyStartLine).join("\n");
     }
 
     // Strip fenced code blocks before scanning (ReDoS defense-in-depth +
     // avoids false-flagging an illustrative citation shown inside a fence).
-    const strippedBody = stripFencedCodeBlocksOnly(text);
+    const strippedBody = stripFencedCodeBlocksOnly(bodyOnlyText);
     let m;
     const bodyRe = new RegExp(CITATION_RE.source, "g");
     while ((m = bodyRe.exec(strippedBody))) {
@@ -1365,9 +1744,581 @@ function relativeEscapePath(fromDir, targetAbsPath) {
   return `${ups}${targetAbsPath}`;
 }
 
+// ---------------------------------------------------------------------------
+// 0.5.1 hardening — D1 (C#/Java method + enum-member detection) self-tests.
+// All fixtures are synthetic (Planet/MERCURY/VENUS/MARS-style generic
+// names) per the hardening plan's hard rule — never a literal string from
+// real evidence.
+// ---------------------------------------------------------------------------
+
+function runSelfTestLayer1CSharpJavaMethodDecl() {
+  const emptyConfig = { ...DEFAULT_CONFIG };
+
+  // Interface method with no modifier, a modifier-bearing class method, a
+  // multi-line wrapped-return-type method, a generic method, nullable-
+  // primitive returns, and a call-site rejection matrix (receiver-qualified,
+  // bare unqualified, await-assigned, ternary-branch) — all in one source so
+  // the "no regression on already-working shapes" and "no new false
+  // positives" assertions share one realistic file.
+  const csSource = `
+public interface IWidgetService {
+    Task<WidgetResponse> GetWidgetAsync(int id);
+}
+
+public class WidgetService : IWidgetService {
+    public async Task<WidgetResponse> GetWidgetAsync(int id) {
+        return await _repo.FindAsync(id);
+    }
+
+    public Task<List<WidgetResponse>>
+        GetWidgetsAsync(WidgetQuery query) {
+        return _repo.ListAsync(query);
+    }
+
+    public T Method<T>() { return default(T); }
+
+    int? MaybeGetCount() { return null; }
+    bool? IsValid() { return null; }
+
+    void CallSites(bool flag) {
+        var a = _repo.NeverDeclaredReceiverCall();
+        var b = NeverDeclaredBareCall();
+        var c = await NeverDeclaredAwaitCall();
+        var result = flag ? GetSomething() : GetOther();
+    }
+}
+`;
+  assert(symbolExistsInSource(csSource, "GetWidgetAsync", ".cs", emptyConfig) === true, "no-modifier interface method decl not found");
+  assert(symbolExistsInSource(csSource, "GetWidgetsAsync", ".cs", emptyConfig) === true, "multi-line wrapped-return-type method decl not found (return type and symbol on separate lines)");
+  assert(symbolExistsInSource(csSource, "Method", ".cs", emptyConfig) === true, "generic method decl (Method<T>()) not found");
+  assert(symbolExistsInSource(csSource, "MaybeGetCount", ".cs", emptyConfig) === true, "nullable-primitive (int?) return method decl not found");
+  assert(symbolExistsInSource(csSource, "IsValid", ".cs", emptyConfig) === true, "nullable-primitive (bool?) return method decl not found");
+  for (const callSite of ["NeverDeclaredReceiverCall", "NeverDeclaredBareCall", "NeverDeclaredAwaitCall", "GetSomething", "GetOther"]) {
+    assert(
+      symbolExistsInSource(csSource, callSite, ".cs", emptyConfig) === false,
+      `call-site shape "${callSite}" was incorrectly resolved as a declaration (false-positive-on-call-site regression)`,
+    );
+  }
+
+  // Mutation-mandate target (§5.1(b)): RETURN_TYPE's positive allowlist
+  // (uppercase-starting token, or an exact primitive keyword) is what makes
+  // a bare, lowercase-starting token immediately preceding a symbol across
+  // a line-wrap correctly REJECTED. None of the call-site shapes above
+  // cross a line-wrap the way a widened ("any identifier") allowlist could
+  // exploit — this adversarial (deliberately not "realistic" C#) fixture
+  // isolates exactly that boundary: a bare lowercase identifier on its own
+  // line, immediately followed (whitespace/newline only, no receiver dot)
+  // by a symbol-shaped token and `(`. Widening RETURN_TYPE to accept any
+  // identifier (not just uppercase-starting/primitive) makes this resolve
+  // true; the allowlist's uppercase/primitive restriction is what keeps it
+  // false.
+  const lowercaseAdjacentSource = "count\nNeverDeclaredWrappedTarget();\n";
+  assert(
+    symbolExistsInSource(lowercaseAdjacentSource, "NeverDeclaredWrappedTarget", ".cs", emptyConfig) === false,
+    "a lowercase-starting token immediately preceding a symbol across a line-wrap was incorrectly resolved as a declaration (RETURN_TYPE allowlist regression)",
+  );
+
+  // Round-3 Blocker 4(b) — the method-decl fallback's OWN block-comment
+  // immunity, dedicated and distinct from the enum-path F1 test below (the
+  // shared stripper closes this for method-decl too, but round 2 never had
+  // a fixture proving it specifically on this path).
+  const blockCommentSource = `
+/*
+public Task<FakeResponse> NeverDeclaredMethod() { }
+*/
+public class RealHolderClass {
+    public void ActualMethod() { }
+}
+`;
+  assert(
+    symbolExistsInSource(blockCommentSource, "NeverDeclaredMethod", ".cs", emptyConfig) === false,
+    "a method-shaped declaration inside a /* ... */ block comment was incorrectly resolved true",
+  );
+  assert(
+    symbolExistsInSource(blockCommentSource, "ActualMethod", ".cs", emptyConfig) === true,
+    "a real method declaration outside the block comment was not found",
+  );
+
+  // Stripper verbatim-string-boundary case (safety re-audit, non-blocking,
+  // §1.3.0) — asserts the CURRENT, accepted (not "fixed") behavior: an
+  // embedded `""`-escape pair inside a C#-verbatim-string-shaped input, in
+  // the common well-formed case, restores quote parity by the time the
+  // scanner reaches the real closing quote, so real code AFTER the string
+  // is still found normally. This is the documented boundary made visible
+  // in the test suite, not left only in prose.
+  const verbatimStringSource = `
+string s = @"embedded ""quote"" here";
+public class RealAfterVerbatimHolder {
+    public void RealAfterVerbatimMethod() { }
+}
+`;
+  assert(
+    symbolExistsInSource(verbatimStringSource, "RealAfterVerbatimMethod", ".cs", emptyConfig) === true,
+    "documented stripper boundary regression: a real declaration after a well-formed verbatim-string-shaped input with an embedded \"\" pair was not found (current accepted behavior expects quote-parity to self-correct here)",
+  );
+
+  console.log("check-doc-cites --self-test: Layer 1 (D1 C#/Java method-decl) — all assertions passed.");
+}
+
+function runSelfTestLayer1EnumMember() {
+  const emptyConfig = { ...DEFAULT_CONFIG };
+
+  // F1 — comment/string-embedded fake enum-member text must never resolve.
+  const commentTrapSource = `
+// enum FakeType { NotReal }
+string s = "enum FakeType { Injected }";
+public enum RealKind { Alpha, Beta }
+`;
+  assert(symbolExistsInSource(commentTrapSource, "NotReal", ".cs", emptyConfig) === false, "F1: a line-comment-embedded fake enum member incorrectly resolved true");
+  assert(symbolExistsInSource(commentTrapSource, "Injected", ".cs", emptyConfig) === false, "F1: a string-literal-embedded fake enum member incorrectly resolved true");
+  assert(symbolExistsInSource(commentTrapSource, "Alpha", ".cs", emptyConfig) === true, "F1 test setup: a real enum member outside the comment/string must still resolve true");
+
+  // F2 — rich Java enum, semicolon-terminated last constant. Also the
+  // round-3 Blocker 2 depth-restriction case: a rich-enum constant's own
+  // overridden method body assigns an instance field (`color = "...";`
+  // inside MERCURY's own `hex()` override) — must NOT resolve as a
+  // top-level enum member (the round-2 NEW-F1 regression this closes).
+  const richEnumSource = `
+public enum Planet {
+    MERCURY(3.3e23) {
+        public double hex() {
+            color = "#8C7853";
+            return 1.0;
+        }
+    },
+    VENUS(4.9e24) {
+        public double hex() { return 2.0; }
+    },
+    MARS(6.4e23) {
+        public double hex() {
+            color = "#B22222";
+            return 3.0;
+        }
+    };
+
+    private double mass;
+    private String color;
+
+    Planet(double mass) { this.mass = mass; }
+    public abstract double hex();
+}
+`;
+  for (const name of ["MERCURY", "VENUS", "MARS"]) {
+    assert(symbolExistsInSource(richEnumSource, name, ".java", emptyConfig) === true, `F2: real Java rich-enum constant "${name}" not found`);
+  }
+  assert(
+    symbolExistsInSource(richEnumSource, "color", ".java", emptyConfig) === false,
+    "round-3 Blocker 2 (NEW-F1): a rich-enum constant's own method-body field assignment incorrectly resolved as a top-level enum member",
+  );
+
+  // Round-3 Blocker 2, second depth-restriction fixture: a static
+  // initializer block's own assignment target must not resolve either.
+  const staticInitSource = `
+public enum Status {
+    A, B, C;
+    static { x = 5; }
+    static int x;
+}
+`;
+  assert(
+    symbolExistsInSource(staticInitSource, "x", ".java", emptyConfig) === false,
+    "round-3 Blocker 2 (NEW-F1): a static/instance initializer block's own assignment target incorrectly resolved as a top-level enum member",
+  );
+  for (const name of ["A", "B", "C"]) {
+    assert(symbolExistsInSource(staticInitSource, name, ".java", emptyConfig) === true, `real enum constant "${name}" not found alongside the static-initializer-block fixture`);
+  }
+
+  // C# explicit-value enum (the other F2 closure) + a plain C# enum with no
+  // trailing members (the shape used again at Layer 2, see below).
+  const csEnumSource = `
+public enum TaskState {
+    Active = 1,
+    Inactive = 2,
+}
+`;
+  assert(symbolExistsInSource(csEnumSource, "Active", ".cs", emptyConfig) === true, "C# explicit-value enum member 'Active' not found");
+  assert(symbolExistsInSource(csEnumSource, "Inactive", ".cs", emptyConfig) === true, "C# explicit-value enum member 'Inactive' not found");
+  const csPlainEnumSource = "public enum WidgetKind { Small, Medium, Large }\n";
+  assert(symbolExistsInSource(csPlainEnumSource, "Medium", ".cs", emptyConfig) === true, "plain C# enum member 'Medium' (no trailing members) not found");
+  // Real bug found while executing the 0.5.1 mutation mandate (not in the
+  // hardening plan's own fixture list): the LAST member in a comma-
+  // separated list with no trailing comma before the closing brace — the
+  // ordinary, ubiquitous `enum Foo { A, B, C }` shape — has no follower
+  // punctuation left inside the interior span at all (the span's own
+  // closing `}` is deliberately excluded from the sliced text). Without
+  // the `$`-end-of-span follower alternative, "Large" here false-
+  // negatively resolved false.
+  assert(symbolExistsInSource(csPlainEnumSource, "Large", ".cs", emptyConfig) === true, "plain C# enum's LAST member 'Large' (no trailing comma before the closing brace) not found");
+
+  // Swift `case`-vs-switch-collision case — an identically-named switch
+  // `case` label elsewhere in the file must not gate/confuse the result,
+  // AND (the actual regression this guards against, per §1.3.3/§5.2(b)) a
+  // switch-statement `case` label for a symbol that is NEVER a real enum
+  // member must not be mistaken for one just because it textually matches
+  // `case <name>` somewhere outside any enum body.
+  const swiftSource = `
+enum Direction {
+    case north, south
+}
+
+func describe(d: Direction) -> String {
+    switch d {
+    case north:
+        return "N"
+    default:
+        return "?"
+    }
+}
+
+func classify(code: Int) -> String {
+    switch code {
+    case notARealDirectionMember:
+        return "special"
+    default:
+        return "normal"
+    }
+}
+`;
+  assert(
+    symbolExistsInSource(swiftSource, "north", ".swift", emptyConfig) === true,
+    "Swift enum case 'north' not found (real declaration inside the enum body)",
+  );
+  assert(
+    symbolExistsInSource(swiftSource, "notARealDirectionMember", ".swift", emptyConfig) === false,
+    "a switch-statement `case` label for a symbol that is NEVER a real enum member was incorrectly resolved true (body-span scoping regression — the collision this test exists to catch)",
+  );
+
+  console.log("check-doc-cites --self-test: Layer 1 (D1 enum-member) — all assertions passed.");
+}
+
+// Adversarial-timing proofs (§1.6) — sandboxed by the hardening plan's
+// planner before being written up; re-asserted here against the actual
+// shipped implementation. Each of these has a corresponding MUTATION (see
+// the 0.5.1 change log's mutation transcript) that must make the relevant
+// assertion below go RED: (a) disabling the windowed scan (feeding the
+// whole stripped file to the method-decl regex with the `m` flag restored),
+// (b) removing the 50,000-char per-span cap on the enum-body depth-counter.
+function runSelfTestTimingCSharpJavaMethodDecl() {
+  const emptyConfig = { ...DEFAULT_CONFIG };
+
+  // (i) thousands of pathological modifier-only lines, at BOTH a typical
+  // (~3,000) AND a stress (50,000+) size — never test at only one
+  // line-count, per the round-2 safety re-audit's explicit recommendation.
+  const modifierLine = "    public static async override readonly partial\n";
+  for (const n of [3000, 50000]) {
+    const pathological = modifierLine.repeat(n) + "public void NeverDeclaredTarget_XYZ() {}\n";
+    const start = Date.now();
+    const found = symbolExistsInSource(pathological, "SomeSymbolThatIsNeverDeclaredAnywhere", ".cs", emptyConfig);
+    const elapsed = Date.now() - start;
+    assert(found === false, `timing fixture setup: an undeclared symbol unexpectedly resolved true at n=${n} pathological modifier-only lines`);
+    assert(
+      elapsed < 3000,
+      `csharpJavaMethodDeclOccursIn took ${elapsed}ms against ${n} pathological modifier-only lines (expected <3000ms, bounded) — possible O(n^2) regression in the windowed scan`,
+    );
+  }
+
+  // (ii) a single ~2MB pathological line — proves the per-window char cap
+  // (not just the line-count) bounds the cost.
+  {
+    const hugeLine = "public static async ".repeat(100_000);
+    const start = Date.now();
+    const found = symbolExistsInSource(hugeLine, "NeverDeclaredOnHugeSingleLine", ".cs", emptyConfig);
+    const elapsed = Date.now() - start;
+    assert(found === false, "timing fixture setup: unexpectedly resolved true on the ~2MB single-line fixture");
+    assert(elapsed < 3000, `csharpJavaMethodDeclOccursIn took ${elapsed}ms against a ~2MB single pathological line (expected <3000ms — capped by the window's own MAX_WINDOW_LINE_CHARS)`);
+  }
+
+  // (iii) thousands of near-miss [Attribute]-prefixed lines.
+  {
+    const attrLine = '    [SomeAttribute("value")]\n    public void AlsoNeverTheTarget() {}\n';
+    const pathological = attrLine.repeat(50_000);
+    const start = Date.now();
+    const found = symbolExistsInSource(pathological, "NeverDeclaredAmongAttributes", ".cs", emptyConfig);
+    const elapsed = Date.now() - start;
+    assert(found === false, "timing fixture setup: unexpectedly resolved true among attribute-prefixed lines");
+    assert(elapsed < 3000, `csharpJavaMethodDeclOccursIn took ${elapsed}ms against 50,000 attribute-prefixed near-miss lines (expected <3000ms)`);
+  }
+
+  console.log("check-doc-cites --self-test: Timing (D1 method-decl windowed scan, §1.6a) — all assertions passed.");
+}
+
+function runSelfTestTimingEnumSpanCap() {
+  const emptyConfig = { ...DEFAULT_CONFIG };
+  // Many unclosed/pathological enum openers, each followed by a long
+  // non-terminating (brace-free) body — the 50,000-char per-span cap is the
+  // genuine ReDoS guard on this path (§1.3.1); removing it (mutation
+  // target) reproduces a real, dramatic blowup on this exact fixture shape.
+  // A 20,000-char (well over the 50,000-char cap once summed across a
+  // handful of openers, and enough that an UNCAPPED scan's per-opener cost
+  // is dominated by the filler rather than the cap) non-terminating body
+  // per opener — chosen for a wide, environment-noise-resistant timing
+  // margin between the capped (fast) and uncapped (catastrophic) cases,
+  // not merely "passes once."
+  const unit = "enum NeverClosedKind {\n" + "x".repeat(20000) + "\n";
+  for (const n of [500, 1000]) {
+    const pathological = unit.repeat(n);
+    const start = Date.now();
+    const found = symbolExistsInSource(pathological, "NeverAMemberOfAnyOfThese", ".java", emptyConfig);
+    const elapsed = Date.now() - start;
+    assert(found === false, `timing fixture setup: unexpectedly resolved true at n=${n} unclosed enum openers`);
+    assert(
+      elapsed < 3000,
+      `findAllEnumBodySpans took ${elapsed}ms against ${n} unclosed/pathological enum openers (expected <3000ms — the 50,000-char per-span cap must bound each opener's scan) — possible ReDoS regression`,
+    );
+  }
+  console.log("check-doc-cites --self-test: Timing (D1 enum-span 50,000-char cap, §1.6b) — all assertions passed.");
+}
+
+function runSelfTestLayer2CSharpMemberDecl() {
+  const scratchRoot = mkdtempSync(join(tmpdir(), "check-doc-cites-selftest-csharp-"));
+  try {
+    const docsAreaDir = join(scratchRoot, "docs", "area");
+    mkdirSync(docsAreaDir, { recursive: true });
+
+    writeFileSync(
+      join(scratchRoot, "IWidgetService.cs"),
+      "public interface IWidgetService {\n    Task<WidgetResponse> GetWidgetAsync(int id);\n}\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(scratchRoot, "WidgetService.cs"),
+      "public class WidgetService : IWidgetService {\n    public async Task<WidgetResponse> GetWidgetAsync(int id) {\n        return await _repo.FindAsync(id);\n    }\n}\n",
+      "utf8",
+    );
+    writeFileSync(join(scratchRoot, "WidgetKind.cs"), "public enum WidgetKind { Small, Medium, Large }\n", "utf8");
+
+    const readmePath = join(docsAreaDir, "README.md");
+    const goodBody =
+      '---\ncovers:\n  - "IWidgetService.cs § GetWidgetAsync"\n  - "WidgetService.cs § GetWidgetAsync"\n  - "WidgetKind.cs § Medium"\nrelated: []\nstatus: current\n---\n\n# Widgets\n\nBody.\n';
+    writeFileSync(readmePath, goodBody, "utf8");
+
+    const config = { ...DEFAULT_CONFIG, scopedDocDirs: ["docs/area"], docsRoot: "docs" };
+
+    let violations = main(scratchRoot, config);
+    assert(violations.length === 0, `D1 Core Layer 2 PASS case unexpectedly failed: ${JSON.stringify(violations)}`);
+
+    // Mutate one citation to a genuine, never-declared call-site-shaped
+    // name -> must go RED.
+    const badBody = goodBody.replace('"WidgetService.cs § GetWidgetAsync"', '"WidgetService.cs § NeverDeclaredCallSite"');
+    writeFileSync(readmePath, badBody, "utf8");
+    violations = main(scratchRoot, config);
+    assert(
+      violations.some((v) => v.startsWith("[symbol-appears-in-file]") && v.includes("NeverDeclaredCallSite")),
+      `mutated citation to a never-declared symbol did not go RED as expected: ${JSON.stringify(violations)}`,
+    );
+
+    // Revert -> GREEN.
+    writeFileSync(readmePath, goodBody, "utf8");
+    violations = main(scratchRoot, config);
+    assert(violations.length === 0, `D1 Core Layer 2 GREEN (post-revert) case unexpectedly failed: ${JSON.stringify(violations)}`);
+
+    console.log("check-doc-cites --self-test: Layer 2 (D1 C#/enum member decl, PASS/RED/GREEN) — passed.");
+  } finally {
+    rmSync(scratchRoot, { recursive: true, force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 0.5.1 hardening — D2 (space-containing `covers` paths) self-tests. Each
+// of the two check-doc-cites.mjs regexes gets its own isolating fixture and
+// mutation (round-3 Blocker 4(a)) — see doc-drift-status.mjs for the third
+// (STRIP_CITE_SUFFIX_RE).
+// ---------------------------------------------------------------------------
+
+function runSelfTestLayer2SpacePathBare() {
+  const scratchRoot = mkdtempSync(join(tmpdir(), "check-doc-cites-selftest-spacepath-bare-"));
+  try {
+    const docsAreaDir = join(scratchRoot, "docs", "area");
+    mkdirSync(docsAreaDir, { recursive: true });
+    const routinesDir = join(scratchRoot, "Some_Reports_DB", "Stored Routines");
+    mkdirSync(routinesDir, { recursive: true });
+    writeFileSync(join(routinesDir, "GetSummary.sql"), "-- synthetic fixture\nSELECT 1;\n", "utf8");
+
+    const readmePath = join(docsAreaDir, "README.md");
+    const goodBody =
+      '---\ncovers:\n  - "Some_Reports_DB/Stored Routines/GetSummary.sql"\nrelated: []\nstatus: current\n---\n\n# Reports\n\nBody.\n';
+    writeFileSync(readmePath, goodBody, "utf8");
+
+    const config = { ...DEFAULT_CONFIG, scopedDocDirs: ["docs/area"], docsRoot: "docs" };
+
+    let violations = main(scratchRoot, config);
+    assert(violations.length === 0, `D2 bare space-path (COVERS_BARE_PATH_RE) PASS case unexpectedly failed: ${JSON.stringify(violations)}`);
+
+    // Mutate to a nonexistent space-containing path -> must go RED with
+    // [cited-file-exists] (NOT a truncated-path message).
+    const badBody = goodBody.replace("GetSummary.sql", "GetSummaryNonexistent.sql");
+    writeFileSync(readmePath, badBody, "utf8");
+    violations = main(scratchRoot, config);
+    assert(
+      violations.some((v) => v.startsWith("[cited-file-exists]") && v.includes("Stored Routines") && v.includes("GetSummaryNonexistent.sql")),
+      `a nonexistent space-containing bare path did not go RED with a full, untruncated [cited-file-exists] path as expected: ${JSON.stringify(violations)}`,
+    );
+
+    writeFileSync(readmePath, goodBody, "utf8");
+    violations = main(scratchRoot, config);
+    assert(violations.length === 0, `D2 bare space-path GREEN (post-revert) case unexpectedly failed: ${JSON.stringify(violations)}`);
+
+    console.log("check-doc-cites --self-test: Layer 2 (D2 COVERS_BARE_PATH_RE space admission) — passed.");
+  } finally {
+    rmSync(scratchRoot, { recursive: true, force: true });
+  }
+}
+
+function runSelfTestLayer2SpacePathCitation() {
+  const scratchRoot = mkdtempSync(join(tmpdir(), "check-doc-cites-selftest-spacepath-citation-"));
+  try {
+    const docsAreaDir = join(scratchRoot, "docs", "area");
+    mkdirSync(docsAreaDir, { recursive: true });
+    const legacyDir = join(scratchRoot, "Legacy Utils");
+    mkdirSync(legacyDir, { recursive: true });
+    // Deliberately a plain, already-proven .ts declaration, isolating this
+    // test from any D1 complexity.
+    writeFileSync(join(legacyDir, "helpers.ts"), "export function doThing() {}\n", "utf8");
+
+    const readmePath = join(docsAreaDir, "README.md");
+    const goodBody =
+      '---\ncovers:\n  - "Legacy Utils/helpers.ts § doThing"\nrelated: []\nstatus: current\n---\n\n# Legacy\n\nBody.\n';
+    writeFileSync(readmePath, goodBody, "utf8");
+
+    const config = { ...DEFAULT_CONFIG, scopedDocDirs: ["docs/area"], docsRoot: "docs" };
+
+    let violations = main(scratchRoot, config);
+    assert(violations.length === 0, `D2 covers-citation space-path (COVERS_CITATION_RE) PASS case unexpectedly failed: ${JSON.stringify(violations)}`);
+
+    // Mutate the SYMBOL (not the path) to a never-declared name -> must go
+    // RED with [symbol-appears-in-file], proving the space-containing path
+    // itself was correctly parsed (not truncated) — the file-exists check
+    // already had to pass to reach the symbol check at all.
+    const badBody = goodBody.replace("§ doThing", "§ neverDeclaredThing");
+    writeFileSync(readmePath, badBody, "utf8");
+    violations = main(scratchRoot, config);
+    assert(
+      violations.some((v) => v.startsWith("[symbol-appears-in-file]") && v.includes("neverDeclaredThing")),
+      `mutated symbol on a space-containing covers citation did not go RED with [symbol-appears-in-file] as expected: ${JSON.stringify(violations)}`,
+    );
+
+    writeFileSync(readmePath, goodBody, "utf8");
+    violations = main(scratchRoot, config);
+    assert(violations.length === 0, `D2 covers-citation space-path GREEN (post-revert) case unexpectedly failed: ${JSON.stringify(violations)}`);
+
+    console.log("check-doc-cites --self-test: Layer 2 (D2 COVERS_CITATION_RE space admission) — passed.");
+  } finally {
+    rmSync(scratchRoot, { recursive: true, force: true });
+  }
+}
+
+function runSelfTestLayer2MdSectionCarveout() {
+  const scratchRoot = mkdtempSync(join(tmpdir(), "check-doc-cites-selftest-mdcarveout-"));
+  try {
+    const docsAreaDir = join(scratchRoot, "docs", "area");
+    mkdirSync(docsAreaDir, { recursive: true });
+    // Deliberately OUTSIDE scopedDocDirs — this is the referenced target,
+    // not itself linted for frontmatter well-formedness (that's a separate,
+    // unrelated check this test doesn't want to also exercise).
+    const referenceDir = join(scratchRoot, "docs", "reference");
+    mkdirSync(referenceDir, { recursive: true });
+    writeFileSync(join(referenceDir, "Overview.md"), "# Overview\n\nSome text.\n", "utf8");
+
+    const readmePath = join(docsAreaDir, "README.md");
+    const goodBody =
+      '---\ncovers:\n  - "docs/reference/Overview.md § Overview"\nrelated: []\nstatus: current\n---\n\n# Area\n\nBody.\n';
+    writeFileSync(readmePath, goodBody, "utf8");
+
+    const config = { ...DEFAULT_CONFIG, scopedDocDirs: ["docs/area"], docsRoot: "docs" };
+
+    let violations = main(scratchRoot, config);
+    assert(
+      !violations.some((v) => v.startsWith("[symbol-appears-in-file]")),
+      `a bare .md § Section doc-section cross-reference was incorrectly treated as a code citation: ${JSON.stringify(violations)}`,
+    );
+
+    // Negative case: a nonexistent .md path must still fire
+    // [cited-file-exists] — the carve-out must not swallow THAT check.
+    const badBody = goodBody.replace("docs/reference/Overview.md", "docs/reference/NonexistentDoc.md");
+    writeFileSync(readmePath, badBody, "utf8");
+    violations = main(scratchRoot, config);
+    assert(
+      violations.some((v) => v.startsWith("[cited-file-exists]") && v.includes("NonexistentDoc.md")),
+      `a nonexistent .md path in a bare § Section reference did not still fire [cited-file-exists]: ${JSON.stringify(violations)}`,
+    );
+
+    writeFileSync(readmePath, goodBody, "utf8");
+    violations = main(scratchRoot, config);
+    assert(violations.length === 0, `D3 GREEN (post-revert) case unexpectedly failed: ${JSON.stringify(violations)}`);
+
+    console.log("check-doc-cites --self-test: Layer 2 (D3 bare .md § Section carve-out) — passed.");
+  } finally {
+    rmSync(scratchRoot, { recursive: true, force: true });
+  }
+}
+
+// 0.5.1 impl-audit finding — boundary-locking test: a `§` citation inside a
+// FREE-TEXT frontmatter field (`status_note`) is intentionally NOT symbol-
+// checked (see main()'s own boundary comment above `bodyOnlyText`); the
+// SAME citation written in the markdown BODY still is. Two ISOLATED cases
+// (not one fixture with both), so the boundary can actually go RED if it
+// regresses: case A has NO body-prose occurrence at all, so the never-
+// declared symbol can ONLY ever be found by (incorrectly) scanning the
+// frontmatter's free-text field — asserting zero violations for it there
+// is a clean, unambiguous proof the field is genuinely unscanned, not
+// merely "also matched via some other path that happens to look similar."
+function runSelfTestLayer2FrontmatterFreeTextBoundary() {
+  const scratchRootA = mkdtempSync(join(tmpdir(), "check-doc-cites-selftest-fm-freetext-a-"));
+  const scratchRootB = mkdtempSync(join(tmpdir(), "check-doc-cites-selftest-fm-freetext-b-"));
+  try {
+    const config = { ...DEFAULT_CONFIG, scopedDocDirs: ["docs/area"], docsRoot: "docs" };
+
+    // Case A: the never-declared citation appears ONLY inside the
+    // free-text `status_note` field — no body-prose occurrence anywhere.
+    const docsAreaDirA = join(scratchRootA, "docs", "area");
+    mkdirSync(docsAreaDirA, { recursive: true });
+    writeFileSync(join(scratchRootA, "thing.ts"), "export function realSymbol() {}\n", "utf8");
+    writeFileSync(
+      join(docsAreaDirA, "README.md"),
+      '---\ncovers:\n  - "thing.ts § realSymbol"\nrelated: []\nstatus: current\nstatus_note: "see thing.ts § statusNoteNeverDeclared for context"\n---\n\n# Area\n\nNo body citation here at all.\n',
+      "utf8",
+    );
+    const violationsA = main(scratchRootA, config);
+    assert(
+      !violationsA.some((v) => v.includes("statusNoteNeverDeclared")),
+      `a § citation that exists ONLY inside the free-text status_note field produced a violation — the documented boundary (frontmatter free-text is never symbol-checked) does not hold: ${JSON.stringify(violationsA)}`,
+    );
+
+    // Case B: the SAME citation, but now ALSO written in the markdown BODY
+    // — must still be symbol-checked normally there.
+    const docsAreaDirB = join(scratchRootB, "docs", "area");
+    mkdirSync(docsAreaDirB, { recursive: true });
+    writeFileSync(join(scratchRootB, "thing.ts"), "export function realSymbol() {}\n", "utf8");
+    writeFileSync(
+      join(docsAreaDirB, "README.md"),
+      '---\ncovers:\n  - "thing.ts § realSymbol"\nrelated: []\nstatus: current\nstatus_note: "see thing.ts § statusNoteNeverDeclared for context"\n---\n\n# Area\n\nSee (thing.ts § statusNoteNeverDeclared) in the body too.\n',
+      "utf8",
+    );
+    const violationsB = main(scratchRootB, config);
+    assert(
+      violationsB.some((v) => v.startsWith("[symbol-appears-in-file]") && v.includes("statusNoteNeverDeclared")),
+      `the SAME citation written in the markdown BODY did not get symbol-checked (the documented boundary is frontmatter-free-text-only, not global): ${JSON.stringify(violationsB)}`,
+    );
+
+    console.log("check-doc-cites --self-test: Layer 2 (frontmatter free-text § boundary — status_note not checked, body still is) — passed.");
+  } finally {
+    rmSync(scratchRootA, { recursive: true, force: true });
+    rmSync(scratchRootB, { recursive: true, force: true });
+  }
+}
+
 function runSelfTest() {
   runSelfTestLayer1();
+  runSelfTestLayer1CSharpJavaMethodDecl();
+  runSelfTestLayer1EnumMember();
+  runSelfTestTimingCSharpJavaMethodDecl();
+  runSelfTestTimingEnumSpanCap();
   runSelfTestLayer2();
+  runSelfTestLayer2CSharpMemberDecl();
+  runSelfTestLayer2SpacePathBare();
+  runSelfTestLayer2SpacePathCitation();
+  runSelfTestLayer2MdSectionCarveout();
+  runSelfTestLayer2FrontmatterFreeTextBoundary();
   runSelfTestLayer2HeadingAnchorEndToEnd();
   runSelfTestLayer2PathTraversal();
   console.log("check-doc-cites --self-test: ALL LAYERS PASSED.");
