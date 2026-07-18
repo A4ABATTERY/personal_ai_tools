@@ -960,8 +960,8 @@ function buildOldStyleCiteRe(config) {
 // see also `stripCiteSuffix` in doc-drift-status.mjs, which has the exact
 // same grammar and needed the same fix.
 //
-// 0.5.1 (D2, §2.1-§2.3): space admitted into the leading path class — a real
-// MSSQL/Windows-tooling-shaped path (e.g. a `Stored Procedures` folder
+// 0.5.1 (D2, §2.1-§2.3): space admitted into the leading path class — a
+// MSSQL/Windows-tooling-shaped path (e.g. a `Stored Routines` folder
 // segment) previously truncated silently after the last space, producing a
 // false "file does not exist." Scoped deliberately to ONLY these two
 // `covers`-frontmatter regexes (and the drift tool's mirrored
