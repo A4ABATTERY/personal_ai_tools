@@ -1081,6 +1081,18 @@ function main(repoRoot, config) {
     // frontmatter-covers path had already correctly resolved. Excluding
     // the frontmatter block from the body-scan closes this without
     // touching PATH_RE_SRC/CITATION_RE at all.
+    //
+    // DOCUMENTED BOUNDARY (intentional, not an oversight — impl-audit
+    // finding, 0.5.1): a `§` citation written inside a FREE-TEXT
+    // frontmatter field (e.g. `status_note: "see thing.ts § symbol"`) is
+    // consequently NOT symbol-checked — only body citations and the
+    // structured `covers`/`related` list fields are. Frontmatter is a
+    // restricted, flat key/scalar-or-list grammar (see `parseFrontmatter`'s
+    // own header comment); a citation belongs in `covers`, which already
+    // gets its own dedicated, correct check above — free-text scalar
+    // fields like `status_note` were never a documented home for a `§`
+    // citation, so this is a narrow, deliberate scope boundary, not a
+    // silently-dropped check.
     let bodyOnlyText = text;
     if (fm.error) {
       violations.push(`[frontmatter] ${relPath}: ${fm.error}`);
@@ -2240,6 +2252,61 @@ function runSelfTestLayer2MdSectionCarveout() {
   }
 }
 
+// 0.5.1 impl-audit finding — boundary-locking test: a `§` citation inside a
+// FREE-TEXT frontmatter field (`status_note`) is intentionally NOT symbol-
+// checked (see main()'s own boundary comment above `bodyOnlyText`); the
+// SAME citation written in the markdown BODY still is. Two ISOLATED cases
+// (not one fixture with both), so the boundary can actually go RED if it
+// regresses: case A has NO body-prose occurrence at all, so the never-
+// declared symbol can ONLY ever be found by (incorrectly) scanning the
+// frontmatter's free-text field — asserting zero violations for it there
+// is a clean, unambiguous proof the field is genuinely unscanned, not
+// merely "also matched via some other path that happens to look similar."
+function runSelfTestLayer2FrontmatterFreeTextBoundary() {
+  const scratchRootA = mkdtempSync(join(tmpdir(), "check-doc-cites-selftest-fm-freetext-a-"));
+  const scratchRootB = mkdtempSync(join(tmpdir(), "check-doc-cites-selftest-fm-freetext-b-"));
+  try {
+    const config = { ...DEFAULT_CONFIG, scopedDocDirs: ["docs/area"], docsRoot: "docs" };
+
+    // Case A: the never-declared citation appears ONLY inside the
+    // free-text `status_note` field — no body-prose occurrence anywhere.
+    const docsAreaDirA = join(scratchRootA, "docs", "area");
+    mkdirSync(docsAreaDirA, { recursive: true });
+    writeFileSync(join(scratchRootA, "thing.ts"), "export function realSymbol() {}\n", "utf8");
+    writeFileSync(
+      join(docsAreaDirA, "README.md"),
+      '---\ncovers:\n  - "thing.ts § realSymbol"\nrelated: []\nstatus: current\nstatus_note: "see thing.ts § statusNoteNeverDeclared for context"\n---\n\n# Area\n\nNo body citation here at all.\n',
+      "utf8",
+    );
+    const violationsA = main(scratchRootA, config);
+    assert(
+      !violationsA.some((v) => v.includes("statusNoteNeverDeclared")),
+      `a § citation that exists ONLY inside the free-text status_note field produced a violation — the documented boundary (frontmatter free-text is never symbol-checked) does not hold: ${JSON.stringify(violationsA)}`,
+    );
+
+    // Case B: the SAME citation, but now ALSO written in the markdown BODY
+    // — must still be symbol-checked normally there.
+    const docsAreaDirB = join(scratchRootB, "docs", "area");
+    mkdirSync(docsAreaDirB, { recursive: true });
+    writeFileSync(join(scratchRootB, "thing.ts"), "export function realSymbol() {}\n", "utf8");
+    writeFileSync(
+      join(docsAreaDirB, "README.md"),
+      '---\ncovers:\n  - "thing.ts § realSymbol"\nrelated: []\nstatus: current\nstatus_note: "see thing.ts § statusNoteNeverDeclared for context"\n---\n\n# Area\n\nSee (thing.ts § statusNoteNeverDeclared) in the body too.\n',
+      "utf8",
+    );
+    const violationsB = main(scratchRootB, config);
+    assert(
+      violationsB.some((v) => v.startsWith("[symbol-appears-in-file]") && v.includes("statusNoteNeverDeclared")),
+      `the SAME citation written in the markdown BODY did not get symbol-checked (the documented boundary is frontmatter-free-text-only, not global): ${JSON.stringify(violationsB)}`,
+    );
+
+    console.log("check-doc-cites --self-test: Layer 2 (frontmatter free-text § boundary — status_note not checked, body still is) — passed.");
+  } finally {
+    rmSync(scratchRootA, { recursive: true, force: true });
+    rmSync(scratchRootB, { recursive: true, force: true });
+  }
+}
+
 function runSelfTest() {
   runSelfTestLayer1();
   runSelfTestLayer1CSharpJavaMethodDecl();
@@ -2251,6 +2318,7 @@ function runSelfTest() {
   runSelfTestLayer2SpacePathBare();
   runSelfTestLayer2SpacePathCitation();
   runSelfTestLayer2MdSectionCarveout();
+  runSelfTestLayer2FrontmatterFreeTextBoundary();
   runSelfTestLayer2HeadingAnchorEndToEnd();
   runSelfTestLayer2PathTraversal();
   console.log("check-doc-cites --self-test: ALL LAYERS PASSED.");
