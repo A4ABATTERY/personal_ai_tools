@@ -2036,7 +2036,13 @@ function runSelfTestTimingEnumSpanCap() {
   // non-terminating (brace-free) body — the 50,000-char per-span cap is the
   // genuine ReDoS guard on this path (§1.3.1); removing it (mutation
   // target) reproduces a real, dramatic blowup on this exact fixture shape.
-  const unit = "enum NeverClosedKind {\n" + "x".repeat(2000) + "\n";
+  // A 20,000-char (well over the 50,000-char cap once summed across a
+  // handful of openers, and enough that an UNCAPPED scan's per-opener cost
+  // is dominated by the filler rather than the cap) non-terminating body
+  // per opener — chosen for a wide, environment-noise-resistant timing
+  // margin between the capped (fast) and uncapped (catastrophic) cases,
+  // not merely "passes once."
+  const unit = "enum NeverClosedKind {\n" + "x".repeat(20000) + "\n";
   for (const n of [500, 1000]) {
     const pathological = unit.repeat(n);
     const start = Date.now();
