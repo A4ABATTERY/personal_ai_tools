@@ -46,7 +46,7 @@ This skill defines the **loop**; the **project** defines its specifics via a nam
 | `defect_ledger` | none (in-engagement list only, per step 0) |
 | `precycle_check` | none |
 
-State the resolved contract (every REQUIRED key + any OPTIONAL overrides) in the first WorkLog entry so a recovered session inherits it verbatim rather than re-resolving. A fully-filled EXAMPLE contract (one project's actual values, not a template to copy) is in the appendix at the end of this file.
+State the resolved contract (every REQUIRED key + any OPTIONAL overrides) in the first WorkLog entry so a recovered session inherits it verbatim rather than re-resolving.
 
 ## Roles & default models (definitions in `agents/od-*.md`)
 
@@ -119,8 +119,10 @@ You may refine this loop as you learn (with the user's standing permission). Eve
 
 ## Changelog
 
+**v2.2.1** — removed the example adaptation-contract appendix: it reproduced one consumer project's real deployment and test-account details. No behaviour change.
+
 **v2.2.0** — the stack-agnostic release (owner directive: OD must run across a wide array of tech stacks and task types — the RSVP webapp is one consumer among several):
-- **Adaptation contract (S4, the centerpiece):** the prose "Project adaptation" table is replaced by a named-key ADAPTATION CONTRACT — REQUIRED vs OPTIONAL keys, contract-values-override-every-default, missing-required-key = BLOCKING setup error (never borrow another project's habits to fill the gap), verify-claimed-gates-exist before planning around them, undeclared existing-orchestrator collision = BLOCKING. A fully-filled example lives in the appendix below.
+- **Adaptation contract (S4, the centerpiece):** the prose "Project adaptation" table is replaced by a named-key ADAPTATION CONTRACT — REQUIRED vs OPTIONAL keys, contract-values-override-every-default, missing-required-key = BLOCKING setup error (never borrow another project's habits to fill the gap), verify-claimed-gates-exist before planning around them, undeclared existing-orchestrator collision = BLOCKING.
 - **Generic stage framing:** the 0–9 steps gain function names (ORIENT → COMMIT-THE-CONTRACT → AUDIT-THE-CONTRACT → PRODUCE-THE-ARTIFACT → ADVERSARIALLY-VERIFY-EVIDENCE-FIRST → INTEGRATE-PER-CONVENTION → PROMOTE-OR-PARK); a well-evidenced negative/null result is a SUCCESSFUL cycle, not a failure.
 - **L12–L32 de-stack-ified** (mined from the RSVP live-ops eras + an industry corpus, generalized for cross-repo use): claims-vs-ground-truth re-verification loop-wide; real-runtime/built-artifact evidence standard (fakes/emulators/source-reads don't discharge runtime criteria); live-shape E2E conditioned on the contract's `e2e.mode`; serialized root-writing dispatches with a path-scoped clean-tree check under `protected_data.commit_staging: allowlist`; assembly-only post-escalation revisions; defect-class sweep + committed-guard-in-the-gate-matrix requirement on fix rounds; defect-ledger injection into the next cycle's criteria; bugfix audits check both reincarnation of the old bug and new failure modes the fix itself introduces; bug-fix dispatches are reproduce-first ("no bug found" is a first-class success); run the documented canonical verification command verbatim, never an improvised proxy; a standing automated adversarial finding is never waved through by panel ACCEPT; quota/usage-window kills relaunch identical (the opposite remedy from 5xx — keyed on whether the agent did any work before dying); write-verify every claimed artifact at return; mid-revision spikes settle unverified facts before a rewrite; multi-integration-unit seam audits + regression pass before the done/promotion signal; micro-path proportionality for trivial diffs; addendum-over-restart + nudge-before-kill; measurement hygiene (artifact-under-test version, host confounds, vantage); explicit context-isolation rationale in the intro; the codegen/generation hazard generalized and demoted into the contract's `hazard_ledger` entry schema (`recovery` field); pre-merge live baseline capture for zero-diff criteria.
 - **Structural (owner-approved):** S1 criteria-blind adversarial pass (lens from `adversarial_lenses`) folded into step 6 — the only gate that catches a defect encoded IN the criteria itself; S2 tester hardening (bounded waits/timeouts on every log/stream/tail, hard self-timebox with partial-report-and-return — see od-tester.md); S3 the `defect_ledger` contract key backing L18's injection rule.
@@ -139,54 +141,3 @@ You may refine this loop as you learn (with the user's standing permission). Eve
 - Scan hygiene: strip CSV/table quoting before validating; delete PII dumps once derived.
 - Docs-ship-with-code covers stale in-code comments, not just docs files.
 - (Companion fix, not in this plugin: codebase-docs doc-maintenance now updates doc frontmatter/cites too.)
-
----
-
-## Appendix — EXAMPLE adaptation contract: the RSVP repo (one consumer's actual values, NOT a template to copy)
-
-```yaml
-contract_location: "repo CLAUDE.md, section 'How we work'"   # no self-update mechanism; CLAUDE.md is durable here
-forge: github            # gh CLI
-integration:
-  mode: pr
-  target: main
-  fast_paths: "docs/spec/config-only changes may fast-forward to main (owner convention)"
-merge_authority: "agent — Claude merges when gates are green"
-authority_map:
-  - action: "production deploy (deploy-prod workflow_dispatch)"
-    who: owner-only
-    note: "Claude and ALL agents PERMANENTLY FORBIDDEN from dispatching, retrying, or automating it; the manual button IS the approval gate"
-gate_commands:
-  - {label: unit, cmd: "vitest run", cwd: ".", class: full}
-  # CI on PR (GitHub Actions) = corroboration; auto-deploys Convex dev + Cloudflare Pages on merge
-e2e:
-  mode: deployed
-  when: post-merge
-  entry: "https://rsvp-app-dev.pages.dev (Convex dev disciplined-puma-605)"
-  accounts: "guests rsvp.testing.person+<tag>@gmail.com (subaddressing); admin via testHelpers session mint; admin inbox IMAP via TEST_GMAIL_APP_PASSWORD — parse, never print"
-isolation_policy: root    # owner decision post-2E; agents self-resolve collisions via worktrees under .claude/worktrees/
-auditor_concurrency: "parallel panel of 2-3"
-budget_caps: none
-hazard_ledger:
-  - cmd: "convex codegen"
-    hazard: "can UPLOAD to the shared dev backend even with CONVEX_DEPLOY_KEY unset (credential files in .env suffice)"
-    containment: "probe sandboxes COPY convex/_generated + convex/betterAuth/_generated from the root checkout; only the root implementer runs codegen"
-    recovery: "re-run last known-good main deploy; static-only gates until reasserted"
-  - cmd: "convex env list"
-    hazard: "dumps secret VALUES"
-    containment: "NEVER run; exposures → the secrets-exposed-rotate-before-prod ledger"
-protected_data:
-  resources: ["the live campaign (never deactivate)", "guest rsvp.testing.person+c2cloud1@gmail.com (never modify)"]
-  forbidden_ops: "all live-data mutations only under capture → byte-identical restore"
-  commit_staging: normal
-docs_contract: "codebase-docs:doc-maintenance after every implementation; docs ship WITH the code in the same PR"
-durable_record: "WORKLOG.md in the runtime per-project memory dir (single writer: orchestrator; one-H1 discipline)"
-artifact_root: "$CLAUDE_JOB_DIR/tmp/<cycle>/"
-model_policy: "ALL sub-agents Sonnet; orchestrator Fable; Haiku for breadth research sweeps"
-adversarial_lenses: "feasibility+regression always; security on auth/data/input; criteria-blind security pass on auth-touching diffs (S1)"
-criteria_freeze: at-plan-accept
-existing_orchestrator: none
-precycle_check: none
-```
-
-Other consumers resolve the same keys very differently — e.g. `merge_authority: human` with sequential-only `auditor_concurrency` and `isolation_policy: worktree` (a repo where AI must never merge and parallel panels have silently dropped runs), `integration.mode: direct-commit` (a research harness where batching into a PR would destroy a pre-registration timestamp), or `protected_data.commit_staging: allowlist` with `e2e.mode: golden-replay` (a repo carrying uncommitted PII where `git add -A` is the single most dangerous action). The contract exists precisely so none of those non-negotiables has to be guessed.
