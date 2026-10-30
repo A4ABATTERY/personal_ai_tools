@@ -17,7 +17,7 @@
     {
       "name": "orchestrated-delivery",
       "description": "Orchestrator-driven delivery loop — independent planning, adversarial panel + blind-gate review, and verified testing before merge.",
-      "version": "2.2.0",
+      "version": "2.2.1",
       "source": "./plugins/orchestrated-delivery",
       "author": {
         "name": "Arunav Biswas"
